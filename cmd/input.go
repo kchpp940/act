@@ -114,18 +114,3 @@ func (i *Input) EventPath() string {
 func (i *Input) Inputfile() string {
 	return i.resolve(i.inputfile)
 }
-
-// ActionCachePath returns path to action cache
-func (i *Input) ActionCachePath() string {
-	return i.resolve(i.actionCachePath)
-}
-
-// ArtifactServerPath returns path to artifact server
-func (i *Input) ArtifactServerPath() string {
-	return i.resolve(i.artifactServerPath)
-}
-
-// CacheServerPath returns path to cache server
-func (i *Input) CacheServerPath() string {
-	return i.resolve(i.cacheServerPath)
-}

@@ -1,7 +1,0 @@
---env-file .env
---secret-file=./secrets
---var-file subdir/.vars
---eventpath event.json
--W ./workflows
--C ..
--P ubuntu-latest=catthehacker/ubuntu:act-latest
