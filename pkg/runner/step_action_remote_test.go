@@ -26,8 +26,8 @@ func (sarm *stepActionRemoteMocks) readAction(_ context.Context, step *model.Ste
 	return args.Get(0).(*model.Action), args.Error(1)
 }
 
-func (sarm *stepActionRemoteMocks) runAction(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor {
-	args := sarm.Called(step, actionDir, remoteAction)
+func (sarm *stepActionRemoteMocks) runAction(step actionStep, actionDir string, actionRef *actionRef) common.Executor {
+	args := sarm.Called(step, actionDir, actionRef)
 	return args.Get(0).(func(context.Context) error)
 }
 
@@ -166,10 +166,10 @@ func TestStepActionRemote(t *testing.T) {
 			}
 
 			if tt.mocks.read {
-				sarm.On("readAction", sar.Step, suffixMatcher("act/remote-action@v1"), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+				sarm.On("readAction", sar.Step, suffixMatcher("github.com-action-remote-action@v1"), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 			}
 			if tt.mocks.run {
-				sarm.On("runAction", sar, suffixMatcher("act/remote-action@v1"), newRemoteAction(sar.Step.Uses)).Return(func(_ context.Context) error { return tt.runError })
+				sarm.On("runAction", sar, suffixMatcher("github.com-action-remote-action@v1"), mock.AnythingOfType("*runner.actionRef")).Return(func(_ context.Context) error { return tt.runError })
 
 				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(func(_ context.Context) error {
 					return nil
@@ -241,7 +241,7 @@ func TestStepActionRemotePre(t *testing.T) {
 				Step: tt.stepModel,
 				RunContext: &RunContext{
 					Config: &Config{
-						GitHubInstance: "https://github.com",
+						GitHubInstance: "github.com",
 					},
 					Run: &model.Run{
 						JobID: "1",
@@ -261,7 +261,7 @@ func TestStepActionRemotePre(t *testing.T) {
 				})
 			}
 
-			sarm.On("readAction", sar.Step, suffixMatcher("org-repo-path@ref"), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+			sarm.On("readAction", sar.Step, suffixMatcher("github.com-action-org-repo-path@ref"), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 
 			err := sar.pre()(ctx)
 
@@ -331,7 +331,7 @@ func TestStepActionRemotePreThroughAction(t *testing.T) {
 				})
 			}
 
-			sarm.On("readAction", sar.Step, suffixMatcher("org-repo-path@ref"), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+			sarm.On("readAction", sar.Step, suffixMatcher("github.com-action-org-repo-path@ref"), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 
 			err := sar.pre()(ctx)
 
@@ -402,7 +402,7 @@ func TestStepActionRemotePreThroughActionToken(t *testing.T) {
 				})
 			}
 
-			sarm.On("readAction", sar.Step, suffixMatcher("org-repo-path@ref"), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
+			sarm.On("readAction", sar.Step, suffixMatcher("github.com-action-org-repo-path@ref"), "path", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 
 			err := sar.pre()(ctx)
 

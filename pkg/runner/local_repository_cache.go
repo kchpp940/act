@@ -22,8 +22,12 @@ type LocalRepositoryCache struct {
 	CacheDirCache     map[string]string
 }
 
-func (l *LocalRepositoryCache) Fetch(ctx context.Context, cacheDir, url, ref, token string) (string, error) {
+func (l *LocalRepositoryCache) Fetch(ctx context.Context, ar *actionRef) (string, error) {
 	logger := common.Logger(ctx)
+	cacheDir := ar.RepoCacheKey()
+	url := ar.CloneURL()
+	ref := ar.GitRefSpec()
+
 	logger.Debugf("LocalRepositoryCache fetch %s with ref %s", url, ref)
 	if dest, ok := l.LocalRepositories[fmt.Sprintf("%s@%s", url, ref)]; ok {
 		logger.Infof("LocalRepositoryCache matched %s with ref %s to %s", url, ref, dest)
@@ -38,7 +42,7 @@ func (l *LocalRepositoryCache) Fetch(ctx context.Context, cacheDir, url, ref, to
 		}
 	}
 	logger.Infof("LocalRepositoryCache not matched %s with Ref %s", url, ref)
-	return l.Parent.Fetch(ctx, cacheDir, url, ref, token)
+	return l.Parent.Fetch(ctx, ar)
 }
 
 func (l *LocalRepositoryCache) GetTarArchive(ctx context.Context, cacheDir, sha, includePrefix string) (io.ReadCloser, error) {

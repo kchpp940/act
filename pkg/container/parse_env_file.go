@@ -25,12 +25,13 @@ func parseEnvFile(e Container, srcPath string, env *map[string]string) common.Ex
 			return err
 		}
 		s := bufio.NewScanner(reader)
-		s.Buffer(nil, 1024*1024*1024)
+		s.Buffer(nil, 1024*1024*1024) // increase buffer to 1GB to avoid scanner buffer overflow
 		firstLine := true
 		for s.Scan() {
 			line := s.Text()
 			if firstLine {
 				firstLine = false
+				// skip utf8 bom, powershell 5 legacy uses it for utf8
 				if len(line) >= 3 && line[0] == 239 && line[1] == 187 && line[2] == 191 {
 					line = line[3:]
 				}
@@ -40,26 +41,24 @@ func parseEnvFile(e Container, srcPath string, env *map[string]string) common.Ex
 			if singleLineEnv != -1 && (multiLineEnv == -1 || singleLineEnv < multiLineEnv) {
 				localEnv[line[:singleLineEnv]] = line[singleLineEnv+1:]
 			} else if multiLineEnv != -1 {
-				var multiLineEnvContent strings.Builder
+				multiLineEnvContent := ""
 				multiLineEnvDelimiter := line[multiLineEnv+2:]
 				delimiterFound := false
-				firstContentLine := true
 				for s.Scan() {
 					content := s.Text()
 					if content == multiLineEnvDelimiter {
 						delimiterFound = true
 						break
 					}
-					if !firstContentLine {
-						multiLineEnvContent.WriteByte('\n')
+					if multiLineEnvContent != "" {
+						multiLineEnvContent += "\n"
 					}
-					firstContentLine = false
-					multiLineEnvContent.WriteString(content)
+					multiLineEnvContent += content
 				}
 				if !delimiterFound {
 					return fmt.Errorf("invalid format delimiter '%v' not found before end of file", multiLineEnvDelimiter)
 				}
-				localEnv[line[:multiLineEnv]] = multiLineEnvContent.String()
+				localEnv[line[:multiLineEnv]] = multiLineEnvContent
 			} else {
 				return fmt.Errorf("invalid format '%v', expected a line with '=' or '<<'", line)
 			}

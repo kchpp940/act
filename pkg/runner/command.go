@@ -14,8 +14,8 @@ var commandPatternGA *regexp.Regexp
 var commandPatternADO *regexp.Regexp
 
 func init() {
-	commandPatternGA = regexp.MustCompile(`^::([^ ]+?)( (.*?))?::(.*?)\r?\n?$`)
-	commandPatternADO = regexp.MustCompile(`^##\[([^ ]+?)( (.*?))?](.*?)\r?\n?$`)
+	commandPatternGA = regexp.MustCompile("^::([^ ]+)( (.+))?::([^\r\n]*)[\r\n]+$")
+	commandPatternADO = regexp.MustCompile("^##\\[([^ ]+)( (.+))?]([^\r\n]*)[\r\n]+$")
 }
 
 func tryParseRawActionCommand(line string) (command string, kvPairs map[string]string, arg string, ok bool) {
@@ -37,7 +37,7 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 	logger := common.Logger(ctx)
 	resumeCommand := ""
 	return func(line string) bool {
-		command, kvPairs, rawArg, ok := tryParseRawActionCommand(line)
+		command, kvPairs, arg, ok := tryParseRawActionCommand(line)
 		if !ok {
 			return true
 		}
@@ -46,8 +46,7 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 			logger.WithFields(logrus.Fields{"command": "ignored", "raw": line}).Infof("  \U00002699  %s", line)
 			return false
 		}
-
-		arg := unescapeCommandData(rawArg)
+		arg = unescapeCommandData(arg)
 		kvPairs = unescapeKvPairs(kvPairs)
 		defCommandLogger := logger.WithFields(logrus.Fields{"command": command, "kvPairs": kvPairs, "arg": arg, "raw": line})
 		switch command {
@@ -75,7 +74,7 @@ func (rc *RunContext) commandHandler(ctx context.Context) common.LineHandler {
 			rc.AddMask(arg)
 			defCommandLogger.Infof("  \U00002699  %s", "***")
 		case "stop-commands":
-			resumeCommand = rawArg
+			resumeCommand = arg
 			defCommandLogger.Infof("  \U00002699  %s", line)
 		case resumeCommand:
 			resumeCommand = ""
@@ -112,7 +111,6 @@ func (rc *RunContext) setEnv(ctx context.Context, kvPairs map[string]string, arg
 	mergeIntoMap(rc.Env, newenv)
 	mergeIntoMap(rc.GlobalEnv, newenv)
 }
-
 func (rc *RunContext) setOutput(ctx context.Context, kvPairs map[string]string, arg string) {
 	logger := common.Logger(ctx)
 	stepID := rc.CurrentStep
@@ -131,7 +129,6 @@ func (rc *RunContext) setOutput(ctx context.Context, kvPairs map[string]string, 
 	logger.WithFields(logrus.Fields{"command": "set-output", "name": outputName, "arg": arg}).Infof("  \U00002699  ::set-output:: %s=%s", outputName, arg)
 	result.Outputs[outputName] = arg
 }
-
 func (rc *RunContext) addPath(ctx context.Context, arg string) {
 	common.Logger(ctx).WithFields(logrus.Fields{"command": "add-path", "arg": arg}).Infof("  \U00002699  ::add-path:: %s", arg)
 	extraPath := []string{arg}
@@ -155,18 +152,27 @@ func parseKeyValuePairs(kvPairs string, separator string) map[string]string {
 	return rtn
 }
 func unescapeCommandData(arg string) string {
-	arg = strings.ReplaceAll(arg, "%0D", "\r")
-	arg = strings.ReplaceAll(arg, "%0A", "\n")
-	arg = strings.ReplaceAll(arg, "%25", "%")
+	escapeMap := map[string]string{
+		"%25": "%",
+		"%0D": "\r",
+		"%0A": "\n",
+	}
+	for k, v := range escapeMap {
+		arg = strings.ReplaceAll(arg, k, v)
+	}
 	return arg
 }
-
 func unescapeCommandProperty(arg string) string {
-	arg = strings.ReplaceAll(arg, "%3A", ":")
-	arg = strings.ReplaceAll(arg, "%2C", ",")
-	arg = strings.ReplaceAll(arg, "%0D", "\r")
-	arg = strings.ReplaceAll(arg, "%0A", "\n")
-	arg = strings.ReplaceAll(arg, "%25", "%")
+	escapeMap := map[string]string{
+		"%25": "%",
+		"%0D": "\r",
+		"%0A": "\n",
+		"%3A": ":",
+		"%2C": ",",
+	}
+	for k, v := range escapeMap {
+		arg = strings.ReplaceAll(arg, k, v)
+	}
 	return arg
 }
 func unescapeKvPairs(kvPairs map[string]string) map[string]string {
@@ -176,9 +182,8 @@ func unescapeKvPairs(kvPairs map[string]string) map[string]string {
 	return kvPairs
 }
 
-func (rc *RunContext) saveState(ctx context.Context, kvPairs map[string]string, arg string) {
+func (rc *RunContext) saveState(_ context.Context, kvPairs map[string]string, arg string) {
 	stepID := rc.CurrentStep
-	stateName := kvPairs["name"]
 	if stepID != "" {
 		if rc.IntraActionState == nil {
 			rc.IntraActionState = map[string]map[string]string{}
@@ -188,7 +193,6 @@ func (rc *RunContext) saveState(ctx context.Context, kvPairs map[string]string, 
 			state = map[string]string{}
 			rc.IntraActionState[stepID] = state
 		}
-		state[stateName] = arg
-		common.Logger(ctx).WithFields(logrus.Fields{"command": "save-state", "name": stateName, "arg": arg}).Debugf("  \U0001f4be  ::save-state:: %s=%s", stateName, arg)
+		state[kvPairs["name"]] = arg
 	}
 }

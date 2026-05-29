@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"regexp"
 	"sync"
 
 	"github.com/nektos/act/pkg/common"
@@ -22,37 +21,34 @@ func newLocalReusableWorkflowExecutor(rc *RunContext) common.Executor {
 
 func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 	uses := rc.Run.Job().Uses
+	ghctx := rc.getGithubContext(context.Background())
 
-	remoteReusableWorkflow := newRemoteReusableWorkflow(uses)
-	if remoteReusableWorkflow == nil {
+	ar := newReusableWorkflowRef(uses, ghctx, rc.Config)
+	if ar == nil {
 		return common.NewErrorExecutor(fmt.Errorf("expected format {owner}/{repo}/.github/workflows/{filename}@{ref}. Actual '%s' Input string was not in a correct format", uses))
 	}
 
-	// uses with safe filename makes the target directory look something like this {owner}-{repo}-.github-workflows-{filename}@{ref}
-	// instead we will just use {owner}-{repo}@{ref} as our target directory. This should also improve performance when we are using
-	// multiple reusable workflows from the same repository and ref since for each workflow we won't have to clone it again
-	filename := fmt.Sprintf("%s/%s@%s", remoteReusableWorkflow.Org, remoteReusableWorkflow.Repo, remoteReusableWorkflow.Ref)
-	workflowDir := fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(filename))
+	workflowDir := fmt.Sprintf("%s/%s", rc.ActionCacheDir(), ar.ExecutionDir())
 
 	if rc.Config.ActionCache != nil {
-		return newActionCacheReusableWorkflowExecutor(rc, filename, remoteReusableWorkflow)
+		return newActionCacheReusableWorkflowExecutor(rc, ar)
 	}
 
 	return common.NewPipelineExecutor(
-		newMutexExecutor(cloneIfRequired(rc, *remoteReusableWorkflow, workflowDir)),
-		newReusableWorkflowExecutor(rc, workflowDir, fmt.Sprintf("./.github/workflows/%s", remoteReusableWorkflow.Filename)),
+		newMutexExecutor(cloneIfRequired(rc, ar, workflowDir)),
+		newReusableWorkflowExecutor(rc, workflowDir, fmt.Sprintf("./%s", ar.Path)),
 	)
 }
 
-func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, remoteReusableWorkflow *remoteReusableWorkflow) common.Executor {
+func newActionCacheReusableWorkflowExecutor(rc *RunContext, ar *actionRef) common.Executor {
 	return func(ctx context.Context) error {
-		ghctx := rc.getGithubContext(ctx)
-		remoteReusableWorkflow.URL = ghctx.ServerURL
-		sha, err := rc.Config.ActionCache.Fetch(ctx, filename, remoteReusableWorkflow.CloneURL(), remoteReusableWorkflow.Ref, ghctx.Token)
+		cacheDir := ar.RepoCacheKey()
+		sha, err := rc.Config.ActionCache.Fetch(ctx, ar)
 		if err != nil {
-			return err
+			return ar.FetchError(err)
 		}
-		archive, err := rc.Config.ActionCache.GetTarArchive(ctx, filename, sha, fmt.Sprintf(".github/workflows/%s", remoteReusableWorkflow.Filename))
+		filename := path.Base(ar.Path)
+		archive, err := rc.Config.ActionCache.GetTarArchive(ctx, cacheDir, sha, ar.Path)
 		if err != nil {
 			return err
 		}
@@ -61,7 +57,7 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 		if _, err = treader.Next(); err != nil {
 			return err
 		}
-		planner, err := model.NewSingleWorkflowPlanner(remoteReusableWorkflow.Filename, treader)
+		planner, err := model.NewSingleWorkflowPlanner(filename, treader)
 		if err != nil {
 			return err
 		}
@@ -92,7 +88,7 @@ func newMutexExecutor(executor common.Executor) common.Executor {
 	}
 }
 
-func cloneIfRequired(rc *RunContext, remoteReusableWorkflow remoteReusableWorkflow, targetDirectory string) common.Executor {
+func cloneIfRequired(rc *RunContext, ar *actionRef, targetDirectory string) common.Executor {
 	return common.NewConditionalExecutor(
 		func(_ context.Context) bool {
 			_, err := os.Stat(targetDirectory)
@@ -100,14 +96,7 @@ func cloneIfRequired(rc *RunContext, remoteReusableWorkflow remoteReusableWorkfl
 			return notExists
 		},
 		func(ctx context.Context) error {
-			remoteReusableWorkflow.URL = rc.getGithubContext(ctx).ServerURL
-			return git.NewGitCloneExecutor(git.NewGitCloneExecutorInput{
-				URL:         remoteReusableWorkflow.CloneURL(),
-				Ref:         remoteReusableWorkflow.Ref,
-				Dir:         targetDirectory,
-				Token:       rc.Config.Token,
-				OfflineMode: rc.Config.ActionOfflineMode,
-			})(ctx)
+			return git.NewGitCloneExecutor(ar.GitCloneInput(targetDirectory))(ctx)
 		},
 		nil,
 	)
@@ -144,33 +133,4 @@ func NewReusableWorkflowRunner(rc *RunContext) (Runner, error) {
 	}
 
 	return runner.configure()
-}
-
-type remoteReusableWorkflow struct {
-	URL      string
-	Org      string
-	Repo     string
-	Filename string
-	Ref      string
-}
-
-func (r *remoteReusableWorkflow) CloneURL() string {
-	return fmt.Sprintf("%s/%s/%s", r.URL, r.Org, r.Repo)
-}
-
-func newRemoteReusableWorkflow(uses string) *remoteReusableWorkflow {
-	// GitHub docs:
-	// https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_iduses
-	r := regexp.MustCompile(`^([^/]+)/([^/]+)/.github/workflows/([^@]+)@(.*)$`)
-	matches := r.FindStringSubmatch(uses)
-	if len(matches) != 5 {
-		return nil
-	}
-	return &remoteReusableWorkflow{
-		Org:      matches[1],
-		Repo:     matches[2],
-		Filename: matches[3],
-		Ref:      matches[4],
-		URL:      "https://github.com",
-	}
 }

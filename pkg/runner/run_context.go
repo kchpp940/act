@@ -989,12 +989,7 @@ func isLocalCheckout(ghc *model.GithubContext, step *model.Step) bool {
 	if step.Type() != model.StepTypeUsesActionRemote {
 		return false
 	}
-	remoteAction := newRemoteAction(step.Uses)
-	if remoteAction == nil {
-		// IsCheckout() will nil panic if we dont bail out early
-		return false
-	}
-	if !remoteAction.IsCheckout() {
+	if !strings.HasPrefix(step.Uses, "actions/checkout@") {
 		return false
 	}
 

@@ -445,12 +445,9 @@ func TestPullAndPostStepFailureIsJobFailure(t *testing.T) {
 type mockCache struct {
 }
 
-func (c mockCache) Fetch(ctx context.Context, cacheDir string, url string, ref string, token string) (string, error) {
+func (c mockCache) Fetch(ctx context.Context, ar *actionRef) (string, error) {
 	_ = ctx
-	_ = cacheDir
-	_ = url
-	_ = ref
-	_ = token
+	_ = ar
 	return "", fmt.Errorf("fetch failure")
 }
 func (c mockCache) GetTarArchive(ctx context.Context, cacheDir string, sha string, includePrefix string) (io.ReadCloser, error) {

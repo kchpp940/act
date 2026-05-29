@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -28,8 +27,7 @@ type stepActionRemote struct {
 	runAction           runAction
 	action              *model.Action
 	env                 map[string]string
-	remoteAction        *remoteAction
-	cacheDir            string
+	actionRef           *actionRef
 	resolvedSha         string
 }
 
@@ -39,47 +37,37 @@ var (
 
 func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 	return func(ctx context.Context) error {
-		if sar.remoteAction != nil && sar.action != nil {
+		if sar.actionRef != nil && sar.action != nil {
 			// we are already good to run
 			return nil
 		}
 
-		sar.remoteAction = newRemoteAction(sar.Step.Uses)
-		if sar.remoteAction == nil {
+		github := sar.getGithubContext(ctx)
+		sar.actionRef = newRemoteActionRef(sar.Step.Uses, github, sar.RunContext.Config)
+		if sar.actionRef == nil {
 			return fmt.Errorf("Expected format {org}/{repo}[/path]@ref. Actual '%s' Input string was not in a correct format", sar.Step.Uses)
 		}
 
-		github := sar.getGithubContext(ctx)
-		sar.remoteAction.URL = github.ServerURL
-
-		if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+		if sar.actionRef.Org == "actions" && sar.actionRef.Repo == "checkout" && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
 			common.Logger(ctx).Debugf("Skipping local actions/checkout because workdir was already copied")
 			return nil
 		}
 
-		for _, action := range sar.RunContext.Config.ReplaceGheActionWithGithubCom {
-			if strings.EqualFold(fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo), action) {
-				sar.remoteAction.URL = "https://github.com"
-				github.Token = sar.RunContext.Config.ReplaceGheActionTokenWithGithubCom
-			}
-		}
 		if sar.RunContext.Config.ActionCache != nil {
 			cache := sar.RunContext.Config.ActionCache
+			cacheDir := sar.actionRef.RepoCacheKey()
 
 			var err error
-			sar.cacheDir = fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo)
-			repoURL := sar.remoteAction.URL + "/" + sar.cacheDir
-			repoRef := sar.remoteAction.Ref
-			sar.resolvedSha, err = cache.Fetch(ctx, sar.cacheDir, repoURL, repoRef, github.Token)
+			sar.resolvedSha, err = cache.Fetch(ctx, sar.actionRef)
 			if err != nil {
-				return fmt.Errorf("failed to fetch \"%s\" version \"%s\": %w", repoURL, repoRef, err)
+				return sar.actionRef.FetchError(err)
 			}
 
 			remoteReader := func(ctx context.Context) actionYamlReader {
 				return func(filename string) (io.Reader, io.Closer, error) {
-					spath := path.Join(sar.remoteAction.Path, filename)
+					spath := path.Join(sar.actionRef.Path, filename)
 					for i := 0; i < maxSymlinkDepth; i++ {
-						tars, err := cache.GetTarArchive(ctx, sar.cacheDir, sar.resolvedSha, spath)
+						tars, err := cache.GetTarArchive(ctx, cacheDir, sar.resolvedSha, spath)
 						if err != nil {
 							return nil, nil, os.ErrNotExist
 						}
@@ -101,24 +89,18 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 				}
 			}
 
-			actionModel, err := sar.readAction(ctx, sar.Step, sar.resolvedSha, sar.remoteAction.Path, remoteReader(ctx), os.WriteFile)
+			actionModel, err := sar.readAction(ctx, sar.Step, sar.resolvedSha, sar.actionRef.Path, remoteReader(ctx), os.WriteFile)
 			sar.action = actionModel
 			return err
 		}
 
-		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
-		gitClone := stepActionRemoteNewCloneExecutor(git.NewGitCloneExecutorInput{
-			URL:         sar.remoteAction.CloneURL(),
-			Ref:         sar.remoteAction.Ref,
-			Dir:         actionDir,
-			Token:       github.Token,
-			OfflineMode: sar.RunContext.Config.ActionOfflineMode,
-		})
+		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.actionRef.ExecutionDir())
+		gitClone := stepActionRemoteNewCloneExecutor(sar.actionRef.GitCloneInput(actionDir))
 		var ntErr common.Executor
 		if err := gitClone(ctx); err != nil {
 			if errors.Is(err, git.ErrShortRef) {
 				return fmt.Errorf("Unable to resolve action `%s`, the provided ref `%s` is the shortened version of a commit SHA, which is not supported. Please use the full commit SHA `%s` instead",
-					sar.Step.Uses, sar.remoteAction.Ref, err.(*git.Error).Commit())
+					sar.actionRef.RawUses, sar.actionRef.Ref, err.(*git.Error).Commit())
 			} else if errors.Is(err, gogit.ErrForceNeeded) { // TODO: figure out if it will be easy to shadow/alias go-git err's
 				ntErr = common.NewInfoExecutor("Non-terminating error while running 'git clone': %v", err)
 			} else {
@@ -128,7 +110,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 
 		remoteReader := func(_ context.Context) actionYamlReader {
 			return func(filename string) (io.Reader, io.Closer, error) {
-				f, err := os.Open(filepath.Join(actionDir, sar.remoteAction.Path, filename))
+				f, err := os.Open(filepath.Join(actionDir, sar.actionRef.Path, filename))
 				return f, f, err
 			}
 		}
@@ -136,7 +118,7 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 		return common.NewPipelineExecutor(
 			ntErr,
 			func(ctx context.Context) error {
-				actionModel, err := sar.readAction(ctx, sar.Step, actionDir, sar.remoteAction.Path, remoteReader(ctx), os.WriteFile)
+				actionModel, err := sar.readAction(ctx, sar.Step, actionDir, sar.actionRef.Path, remoteReader(ctx), os.WriteFile)
 				sar.action = actionModel
 				return err
 			},
@@ -157,7 +139,7 @@ func (sar *stepActionRemote) main() common.Executor {
 		sar.prepareActionExecutor(),
 		runStepExecutor(sar, stepStageMain, func(ctx context.Context) error {
 			github := sar.getGithubContext(ctx)
-			if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+			if sar.actionRef.Org == "actions" && sar.actionRef.Repo == "checkout" && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
 				if sar.RunContext.Config.BindWorkdir {
 					common.Logger(ctx).Debugf("Skipping local actions/checkout because you bound your workspace")
 					return nil
@@ -167,9 +149,9 @@ func (sar *stepActionRemote) main() common.Executor {
 				return sar.RunContext.JobContainer.CopyDir(copyToPath, sar.RunContext.Config.Workdir+string(filepath.Separator)+".", sar.RunContext.Config.UseGitIgnore)(ctx)
 			}
 
-			actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
+			actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.actionRef.ExecutionDir())
 
-			return sar.runAction(sar, actionDir, sar.remoteAction)(ctx)
+			return sar.runAction(sar, actionDir, sar.actionRef)(ctx)
 		}),
 	)
 }
@@ -185,11 +167,9 @@ func (sar *stepActionRemote) getRunContext() *RunContext {
 func (sar *stepActionRemote) getGithubContext(ctx context.Context) *model.GithubContext {
 	ghc := sar.getRunContext().getGithubContext(ctx)
 
-	// extend github context if we already have an initialized remoteAction
-	remoteAction := sar.remoteAction
-	if remoteAction != nil {
-		ghc.ActionRepository = fmt.Sprintf("%s/%s", remoteAction.Org, remoteAction.Repo)
-		ghc.ActionRef = remoteAction.Ref
+	if sar.actionRef != nil {
+		ghc.ActionRepository = fmt.Sprintf("%s/%s", sar.actionRef.Org, sar.actionRef.Repo)
+		ghc.ActionRef = sar.actionRef.Ref
 	}
 
 	return ghc
@@ -207,7 +187,7 @@ func (sar *stepActionRemote) getIfExpression(ctx context.Context, stage stepStag
 	switch stage {
 	case stepStagePre:
 		github := sar.getGithubContext(ctx)
-		if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+		if sar.actionRef != nil && sar.actionRef.Org == "actions" && sar.actionRef.Repo == "checkout" && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
 			// skip local checkout pre step
 			return "false"
 		}
@@ -226,8 +206,8 @@ func (sar *stepActionRemote) getActionModel() *model.Action {
 
 func (sar *stepActionRemote) getCompositeRunContext(ctx context.Context) *RunContext {
 	if sar.compositeRunContext == nil {
-		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
-		actionLocation := path.Join(actionDir, sar.remoteAction.Path)
+		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), sar.actionRef.ExecutionDir())
+		actionLocation := path.Join(actionDir, sar.actionRef.Path)
 		_, containerActionDir := getContainerActionPaths(sar.getStepModel(), actionLocation, sar.RunContext)
 
 		sar.compositeRunContext = newCompositeRunContext(ctx, sar.RunContext, sar, containerActionDir)
@@ -250,44 +230,7 @@ func (sar *stepActionRemote) getCompositeSteps() *compositeSteps {
 	return sar.compositeSteps
 }
 
-type remoteAction struct {
-	URL  string
-	Org  string
-	Repo string
-	Path string
-	Ref  string
-}
 
-func (ra *remoteAction) CloneURL() string {
-	return fmt.Sprintf("%s/%s/%s", ra.URL, ra.Org, ra.Repo)
-}
-
-func (ra *remoteAction) IsCheckout() bool {
-	if ra.Org == "actions" && ra.Repo == "checkout" {
-		return true
-	}
-	return false
-}
-
-func newRemoteAction(action string) *remoteAction {
-	// GitHub's document[^] describes:
-	// > We strongly recommend that you include the version of
-	// > the action you are using by specifying a Git ref, SHA, or Docker tag number.
-	// Actually, the workflow stops if there is the uses directive that hasn't @ref.
-	// [^]: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
-	r := regexp.MustCompile(`^([^/@]+)/([^/@]+)(/([^@]*))?(@(.*))?$`)
-	matches := r.FindStringSubmatch(action)
-	if len(matches) < 7 || matches[6] == "" {
-		return nil
-	}
-	return &remoteAction{
-		Org:  matches[1],
-		Repo: matches[2],
-		Path: matches[4],
-		Ref:  matches[6],
-		URL:  "https://github.com",
-	}
-}
 
 func safeFilename(s string) string {
 	return strings.NewReplacer(

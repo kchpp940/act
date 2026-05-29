@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,9 +18,172 @@ import (
 	"github.com/kballard/go-shellquote"
 
 	"github.com/nektos/act/pkg/common"
+	"github.com/nektos/act/pkg/common/git"
 	"github.com/nektos/act/pkg/container"
 	"github.com/nektos/act/pkg/model"
 )
+
+type actionRef struct {
+	Host         string
+	Org          string
+	Repo         string
+	Path         string
+	Ref          string
+	Token        string
+	IsGHE        bool
+	IsAction     bool
+	RawUses      string
+	OfflineMode  bool
+}
+
+func (ar *actionRef) CloneURL() string {
+	return fmt.Sprintf("https://%s/%s/%s", ar.Host, ar.Org, ar.Repo)
+}
+
+func (ar *actionRef) RepoCacheKey() string {
+	return fmt.Sprintf("%s/%s/%s", ar.Host, ar.Org, ar.Repo)
+}
+
+func (ar *actionRef) ExecutionCacheKey() string {
+	kind := "action"
+	if !ar.IsAction {
+		kind = "workflow"
+	}
+	if ar.Path != "" {
+		return fmt.Sprintf("%s/%s/%s/%s/%s@%s", ar.Host, kind, ar.Org, ar.Repo, ar.Path, ar.Ref)
+	}
+	return fmt.Sprintf("%s/%s/%s/%s@%s", ar.Host, kind, ar.Org, ar.Repo, ar.Ref)
+}
+
+func (ar *actionRef) NormalizedUses() string {
+	if ar.IsAction {
+		if ar.Path != "" {
+			return fmt.Sprintf("%s/%s/%s@%s", ar.Org, ar.Repo, ar.Path, ar.Ref)
+		}
+		return fmt.Sprintf("%s/%s@%s", ar.Org, ar.Repo, ar.Ref)
+	}
+	return fmt.Sprintf("%s/%s/%s@%s", ar.Org, ar.Repo, ar.Path, ar.Ref)
+}
+
+func (ar *actionRef) GitRefSpec() string {
+	if strings.HasPrefix(ar.Ref, "refs/") {
+		return ar.Ref
+	}
+	if regexp.MustCompile(`^[0-9a-fA-F]{40}$`).MatchString(ar.Ref) {
+		return ar.Ref
+	}
+	return fmt.Sprintf("refs/heads/%s", ar.Ref)
+}
+
+func (ar *actionRef) ExecutionDir() string {
+	return safeFilename(ar.ExecutionCacheKey())
+}
+
+func (ar *actionRef) OfflineError() error {
+	return fmt.Errorf("unable to resolve action `%s` in offline mode, was it already cached?", ar.RawUses)
+}
+
+func (ar *actionRef) FetchError(cause error) error {
+	return fmt.Errorf("failed to fetch \"%s\" version \"%s\": %w", ar.CloneURL(), ar.Ref, cause)
+}
+
+func (ar *actionRef) GitCloneInput(dir string) git.NewGitCloneExecutorInput {
+	return git.NewGitCloneExecutorInput{
+		URL:         ar.CloneURL(),
+		Ref:         ar.Ref,
+		Dir:         dir,
+		Token:       ar.Token,
+		OfflineMode: ar.OfflineMode,
+	}
+}
+
+func newRemoteActionRef(uses string, githubCtx *model.GithubContext, config *Config) *actionRef {
+	ar := &actionRef{
+		IsAction:    true,
+		RawUses:    uses,
+		OfflineMode: config.ActionOfflineMode,
+	}
+
+	host := "github.com"
+	if githubCtx != nil && githubCtx.ServerURL != "" {
+		if u, err := url.Parse(githubCtx.ServerURL); err == nil {
+			host = u.Host
+		}
+	}
+	ar.Host = host
+	ar.IsGHE = host != "github.com"
+
+	ar.Token = config.Token
+	if githubCtx != nil && githubCtx.Token != "" {
+		ar.Token = githubCtx.Token
+	}
+
+	r := regexp.MustCompile(`^([^/@]+)/([^/@]+)(/([^@]*))?(@(.*))?$`)
+	matches := r.FindStringSubmatch(uses)
+	if len(matches) >= 7 && matches[6] != "" {
+		ar.Org = matches[1]
+		ar.Repo = matches[2]
+		ar.Path = matches[4]
+		ar.Ref = matches[6]
+	} else {
+		return nil
+	}
+
+	for _, action := range config.ReplaceGheActionWithGithubCom {
+		if strings.EqualFold(fmt.Sprintf("%s/%s", ar.Org, ar.Repo), action) {
+			ar.Host = "github.com"
+			ar.IsGHE = false
+			ar.Token = config.ReplaceGheActionTokenWithGithubCom
+			break
+		}
+	}
+
+	return ar
+}
+
+func newReusableWorkflowRef(uses string, githubCtx *model.GithubContext, config *Config) *actionRef {
+	ar := &actionRef{
+		IsAction:    false,
+		RawUses:    uses,
+		OfflineMode: config.ActionOfflineMode,
+	}
+
+	host := "github.com"
+	if githubCtx != nil && githubCtx.ServerURL != "" {
+		if u, err := url.Parse(githubCtx.ServerURL); err == nil {
+			host = u.Host
+		}
+	}
+	ar.Host = host
+	ar.IsGHE = host != "github.com"
+
+	ar.Token = config.Token
+	if githubCtx != nil && githubCtx.Token != "" {
+		ar.Token = githubCtx.Token
+	}
+
+	r := regexp.MustCompile(`^([^/]+)/([^/]+)/.github/workflows/([^@]+)@(.*)$`)
+	matches := r.FindStringSubmatch(uses)
+	if len(matches) == 5 {
+		ar.Org = matches[1]
+		ar.Repo = matches[2]
+		ar.Path = fmt.Sprintf(".github/workflows/%s", matches[3])
+		ar.Ref = matches[4]
+	} else {
+		return nil
+	}
+
+	for _, action := range config.ReplaceGheActionWithGithubCom {
+		if strings.EqualFold(fmt.Sprintf("%s/%s", ar.Org, ar.Repo), action) {
+			ar.Host = "github.com"
+			ar.IsGHE = false
+			ar.Token = config.ReplaceGheActionTokenWithGithubCom
+			break
+		}
+	}
+
+	return ar
+}
 
 type actionStep interface {
 	step
@@ -35,7 +199,7 @@ type actionYamlReader func(filename string) (io.Reader, io.Closer, error)
 
 type fileWriter func(filename string, data []byte, perm fs.FileMode) error
 
-type runAction func(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor
+type runAction func(step actionStep, actionDir string, _ *actionRef) common.Executor
 
 //go:embed res/trampoline.js
 var trampoline embed.FS
@@ -135,7 +299,7 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 
 	if rc.Config != nil && rc.Config.ActionCache != nil {
 		raction := step.(*stepActionRemote)
-		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.cacheDir, raction.resolvedSha, "")
+		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.actionRef.RepoCacheKey(), raction.resolvedSha, "")
 		if err != nil {
 			return err
 		}
@@ -150,21 +314,21 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 	return rc.JobContainer.CopyDir(containerActionDirCopy, actionDir+"/", rc.Config.UseGitIgnore)(ctx)
 }
 
-func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor {
+func runActionImpl(step actionStep, actionDir string, actionRef *actionRef) common.Executor {
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
 
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		actionPath := ""
-		if remoteAction != nil && remoteAction.Path != "" {
-			actionPath = remoteAction.Path
+		if actionRef != nil && actionRef.Path != "" {
+			actionPath = actionRef.Path
 		}
 
 		action := step.getActionModel()
 		logger.Debugf("About to run action %v", action)
 
-		err := setupActionEnv(ctx, step, remoteAction)
+		err := setupActionEnv(ctx, step, actionRef)
 		if err != nil {
 			return err
 		}
@@ -187,11 +351,11 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
 		case x.IsDocker():
-			if remoteAction == nil {
+			if actionRef == nil {
 				actionDir = ""
 				actionPath = containerActionDir
 			}
-			return execAsDocker(ctx, step, actionName, actionDir, actionPath, remoteAction == nil, "entrypoint")
+			return execAsDocker(ctx, step, actionName, actionDir, actionPath, actionRef == nil, "entrypoint")
 		case x.IsComposite():
 			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
 				return err
@@ -211,7 +375,7 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 	}
 }
 
-func setupActionEnv(ctx context.Context, step actionStep, _ *remoteAction) error {
+func setupActionEnv(ctx context.Context, step actionStep, _ *actionRef) error {
 	rc := step.getRunContext()
 
 	// A few fields in the environment (e.g. GITHUB_ACTION_REPOSITORY)
@@ -295,7 +459,7 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 				defer buildContext.Close()
 			} else if rc.Config.ActionCache != nil {
 				rstep := step.(*stepActionRemote)
-				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, contextDir)
+				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.actionRef.RepoCacheKey(), rstep.resolvedSha, contextDir)
 				if err != nil {
 					return err
 				}
@@ -531,8 +695,12 @@ func runPreStep(step actionStep) common.Executor {
 		var actionPath string
 		var remoteAction *stepActionRemote
 		if remote, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
-			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
+			if remote.actionRef != nil {
+				actionPath = remote.actionRef.Path
+				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), remote.actionRef.ExecutionDir())
+			} else {
+				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
+			}
 			remoteAction = remote
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
@@ -635,8 +803,12 @@ func runPostStep(step actionStep) common.Executor {
 		var actionPath string
 		var remoteAction *stepActionRemote
 		if remote, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
-			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
+			if remote.actionRef != nil {
+				actionPath = remote.actionRef.Path
+				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), remote.actionRef.ExecutionDir())
+			} else {
+				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
+			}
 			remoteAction = remote
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
