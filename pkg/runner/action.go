@@ -252,25 +252,17 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 
 	var prepImage common.Executor
 	var image string
-	var isDockerImage bool
-
-	cfg := ActionContainerConfig{
-		StepID: step.getStepModel().ID,
-		Env:    *step.getEnv(),
-	}
-	spec := rc.newBaseContainerRuntimeSpec(ctx)
-
+	forcePull := false
 	if strings.HasPrefix(action.Runs.Image, "docker://") {
 		image = strings.TrimPrefix(action.Runs.Image, "docker://")
-		isDockerImage = true
-		spec.Image = image
+		// Apply forcePull only for prebuild docker images
+		forcePull = rc.Config.ForcePull
 	} else {
 		// "-dockeraction" enshures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
 		image = fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(actionName, "-"), "latest")
 		image = fmt.Sprintf("act-%s", strings.TrimLeft(image, "-"))
 		image = strings.ToLower(image)
-		spec.Image = image
-		spec.BuildContext, spec.DockerfilePath = path.Split(path.Join(subpath, action.Runs.Image))
+		contextDir, fileName := path.Split(path.Join(subpath, action.Runs.Image))
 
 		anyArchExists, err := container.ImageExistsLocally(ctx, image, "any")
 		if err != nil {
@@ -290,29 +282,28 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 			if !wasRemoved {
 				return fmt.Errorf("failed to remove image '%s'", image)
 			}
-			correctArchExists = false
 		}
 
-		if spec.ShouldBuild(!correctArchExists) {
-			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, spec.BuildContext)
+		if !correctArchExists || rc.Config.ForceRebuild {
+			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, contextDir)
 			var buildContext io.ReadCloser
 			if localAction {
-				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, spec.BuildContext+"/.")
+				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, contextDir+"/.")
 				if err != nil {
 					return err
 				}
 				defer buildContext.Close()
 			} else if rc.Config.ActionCache != nil {
 				rstep := step.(*stepActionRemote)
-				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, spec.BuildContext)
+				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, contextDir)
 				if err != nil {
 					return err
 				}
 				defer buildContext.Close()
 			}
 			prepImage = container.NewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
-				ContextDir:   filepath.Join(basedir, spec.BuildContext),
-				Dockerfile:   spec.DockerfilePath,
+				ContextDir:   filepath.Join(basedir, contextDir),
+				Dockerfile:   fileName,
 				ImageTag:     image,
 				BuildContext: buildContext,
 				Platform:     rc.Config.ContainerArchitecture,
@@ -352,51 +343,15 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 			entrypoint = nil
 		}
 	}
-
-	cfg.Image = image
-	cfg.Entrypoint = entrypoint
-	cfg.Cmd = cmd
-	actionSpec, err := rc.newActionContainerRuntimeSpec(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create action container spec: %w", err)
-	}
-
-	rawLogger := common.Logger(ctx).WithField("raw_output", true)
-	logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-		if rc.Config.LogOutput {
-			rawLogger.Infof("%s", s)
-		} else {
-			rawLogger.Debugf("%s", s)
-		}
-		return true
-	})
-
-	if rc.IsHostEnv(ctx) {
-		ext := container.LinuxContainerEnvironmentExtensions{}
-		actionSpec.WorkingDir = ext.ToContainerPath(rc.Config.Workdir)
-	} else {
-		actionSpec.WorkingDir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
-	}
-
-	actionSpec.Stdout = logWriter
-	actionSpec.Stderr = logWriter
-
-	stepContainer := container.NewContainer(actionSpec.ToNewContainerInput())
-
-	shouldForcePull := isDockerImage && !actionSpec.ShouldSkipPull()
-	forcePull := isDockerImage && actionSpec.ShouldForcePull()
-	shouldRemove := actionSpec.ShouldRemove()
-
-	pullExec := stepContainer.Pull(forcePull).IfBool(shouldForcePull)
-
+	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint)
 	return common.NewPipelineExecutor(
 		prepImage,
-		pullExec,
-		stepContainer.Remove().IfBool(shouldRemove),
+		stepContainer.Pull(forcePull),
+		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
 		stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 		stepContainer.Start(true),
 	).Finally(
-		stepContainer.Remove().IfBool(shouldRemove),
+		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
 	).Finally(stepContainer.Close())(ctx)
 }
 
@@ -427,6 +382,60 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	for k, v := range *step.getEnv() {
 		(*step.getEnv())[k] = ee.Interpolate(ctx, v)
 	}
+}
+
+func newStepContainer(ctx context.Context, step step, image string, cmd []string, entrypoint []string) container.Container {
+	rc := step.getRunContext()
+	stepModel := step.getStepModel()
+	rawLogger := common.Logger(ctx).WithField("raw_output", true)
+	logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
+		if rc.Config.LogOutput {
+			rawLogger.Infof("%s", s)
+		} else {
+			rawLogger.Debugf("%s", s)
+		}
+		return true
+	})
+	envList := make([]string, 0)
+	for k, v := range *step.getEnv() {
+		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+
+	binds, mounts := rc.GetBindsAndMounts()
+	networkMode := fmt.Sprintf("container:%s", rc.jobContainerName())
+	var workdir string
+	if rc.IsHostEnv(ctx) {
+		networkMode = "default"
+		ext := container.LinuxContainerEnvironmentExtensions{}
+		workdir = ext.ToContainerPath(rc.Config.Workdir)
+	} else {
+		workdir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
+	}
+	stepContainer := container.NewContainer(&container.NewContainerInput{
+		Cmd:         cmd,
+		Entrypoint:  entrypoint,
+		WorkingDir:  workdir,
+		Image:       image,
+		Username:    rc.Config.Secrets["DOCKER_USERNAME"],
+		Password:    rc.Config.Secrets["DOCKER_PASSWORD"],
+		Name:        createContainerName(rc.jobContainerName(), stepModel.ID),
+		Env:         envList,
+		Mounts:      mounts,
+		NetworkMode: networkMode,
+		Binds:       binds,
+		Stdout:      logWriter,
+		Stderr:      logWriter,
+		Privileged:  rc.Config.Privileged,
+		UsernsMode:  rc.Config.UsernsMode,
+		Platform:    rc.Config.ContainerArchitecture,
+		Options:     rc.Config.ContainerOptions,
+	})
+	return stepContainer
 }
 
 func populateEnvsFromSavedState(env *map[string]string, step actionStep, rc *RunContext) {

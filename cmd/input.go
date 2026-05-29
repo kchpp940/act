@@ -65,6 +65,8 @@ type Input struct {
 	validate                           bool
 	strict                             bool
 	concurrentJobs                     int
+	preview                            bool
+	previewJson                        bool
 }
 
 func (i *Input) resolve(path string) string {
