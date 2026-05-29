@@ -143,6 +143,37 @@ func withStepLogger(ctx context.Context, stepID string, stepName string, stageNa
 
 type entryProcessor func(entry *logrus.Entry) *logrus.Entry
 
+func maskStringValue(s string, secretValues []string, masks *[]string) string {
+	for _, v := range secretValues {
+		if v != "" {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+	}
+	for _, v := range *masks {
+		if v != "" {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+	}
+	return s
+}
+
+func maskDataFields(data map[string]interface{}, secretValues []string, masks *[]string) {
+	for k, v := range data {
+		switch val := v.(type) {
+		case string:
+			data[k] = maskStringValue(val, secretValues, masks)
+		case map[string]interface{}:
+			maskDataFields(val, secretValues, masks)
+		case []interface{}:
+			for i, item := range val {
+				if s, ok := item.(string); ok {
+					val[i] = maskStringValue(s, secretValues, masks)
+				}
+			}
+		}
+	}
+}
+
 func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor {
 	ssecrets := []string{}
 	for _, v := range secrets {
@@ -155,17 +186,8 @@ func valueMasker(insecureSecrets bool, secrets map[string]string) entryProcessor
 
 		masks := Masks(entry.Context)
 
-		for _, v := range ssecrets {
-			if v != "" {
-				entry.Message = strings.ReplaceAll(entry.Message, v, "***")
-			}
-		}
-
-		for _, v := range *masks {
-			if v != "" {
-				entry.Message = strings.ReplaceAll(entry.Message, v, "***")
-			}
-		}
+		entry.Message = maskStringValue(entry.Message, ssecrets, masks)
+		maskDataFields(entry.Data, ssecrets, masks)
 
 		return entry
 	}

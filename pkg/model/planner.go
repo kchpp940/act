@@ -300,17 +300,6 @@ func (wp *workflowPlanner) GetEvents() []string {
 	return events
 }
 
-// NewSingleJobPlan creates a Plan for a single job from a specific workflow
-func NewSingleJobPlan(workflow *Workflow, jobID string) (*Plan, error) {
-	plan := new(Plan)
-	stages, err := createStages(workflow, jobID)
-	if err != nil {
-		return nil, err
-	}
-	plan.mergeStages(stages)
-	return plan, nil
-}
-
 // MaxRunNameLen determines the max name length of all jobs
 func (p *Plan) MaxRunNameLen() int {
 	maxRunNameLen := 0

@@ -387,105 +387,6 @@ func parseMatrix(matrix []string) map[string]map[string]bool {
 	return matrixes
 }
 
-type WorkflowSelection struct {
-	planner   model.WorkflowPlanner
-	eventName string
-	jobID     string
-	plan      *model.Plan
-	err       error
-}
-
-func NewWorkflowSelection(
-	workflowsPath string,
-	noWorkflowRecurse bool,
-	strict bool,
-	eventArgs []string,
-	jobID string,
-	autodetectEvent bool,
-) *WorkflowSelection {
-	sel := &WorkflowSelection{
-		jobID: jobID,
-	}
-
-	sel.planner, sel.err = model.NewWorkflowPlanner(workflowsPath, noWorkflowRecurse, strict)
-	if sel.err != nil {
-		return sel
-	}
-
-	events := sel.planner.GetEvents()
-	sel.eventName = resolveEventName(eventArgs, events, autodetectEvent)
-
-	sel.plan, sel.err = buildPlan(sel.planner, jobID, sel.eventName)
-	if sel.plan != nil && len(sel.plan.Stages) == 0 {
-		sel.err = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
-	}
-	if sel.plan == nil && sel.err != nil {
-		return sel
-	}
-	return sel
-}
-
-func (sel *WorkflowSelection) Planner() model.WorkflowPlanner { return sel.planner }
-func (sel *WorkflowSelection) EventName() string              { return sel.eventName }
-func (sel *WorkflowSelection) JobID() string                  { return sel.jobID }
-func (sel *WorkflowSelection) Plan() *model.Plan              { return sel.plan }
-func (sel *WorkflowSelection) Err() error                     { return sel.err }
-
-func resolveEventName(args []string, events []string, autodetectEvent bool) string {
-	if len(args) > 0 {
-		log.Debugf("Using first passed in arguments event: %s", args[0])
-		return args[0]
-	}
-	if len(events) == 1 && len(events[0]) > 0 {
-		log.Debugf("Using the only detected workflow event: %s", events[0])
-		return events[0]
-	}
-	if autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
-		log.Debugf("Using first detected workflow event: %s", events[0])
-		return events[0]
-	}
-	log.Debugf("Using default workflow event: push")
-	return "push"
-}
-
-func buildPlan(planner model.WorkflowPlanner, jobID string, eventName string) (*model.Plan, error) {
-	if jobID != "" {
-		log.Debugf("Planning job: %s (only within workflows that match event '%s')", jobID, eventName)
-		return planJobInEvent(planner, jobID, eventName)
-	}
-	log.Debugf("Planning jobs for event: %s", eventName)
-	return planner.PlanEvent(eventName)
-}
-
-func planJobInEvent(planner model.WorkflowPlanner, jobID string, eventName string) (*model.Plan, error) {
-	eventPlan, err := planner.PlanEvent(eventName)
-	if err != nil {
-		return nil, err
-	}
-
-	var matchingRuns []*model.Run
-	for _, stage := range eventPlan.Stages {
-		for _, run := range stage.Runs {
-			if run.JobID == jobID {
-				matchingRuns = append(matchingRuns, run)
-			}
-		}
-	}
-
-	if len(matchingRuns) == 0 {
-		return nil, fmt.Errorf("job '%s' not found in any workflow matching event '%s'", jobID, eventName)
-	}
-	if len(matchingRuns) > 1 {
-		var workflowFiles []string
-		for _, run := range matchingRuns {
-			workflowFiles = append(workflowFiles, run.Workflow.File)
-		}
-		return nil, fmt.Errorf("job name '%s' is ambiguous, found in multiple workflow files: %v. Use `-W` to specify the exact workflow file path", jobID, workflowFiles)
-	}
-
-	return model.NewSingleJobPlan(matchingRuns[0].Workflow, jobID)
-}
-
 //nolint:gocyclo
 func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
@@ -547,65 +448,129 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		matrixes := parseMatrix(input.matrix)
 		log.Debugf("Evaluated matrix inclusions: %v", matrixes)
 
+		planner, err := model.NewWorkflowPlanner(input.WorkflowsPath(), input.noWorkflowRecurse, input.strict)
+		if err != nil {
+			return err
+		}
+
 		jobID, err := cmd.Flags().GetString("job")
 		if err != nil {
 			return err
 		}
 
-		sel := NewWorkflowSelection(
-			input.WorkflowsPath(),
-			input.noWorkflowRecurse,
-			input.strict,
-			args,
-			jobID,
-			input.autodetectEvent,
-		)
-		plan := sel.Plan()
-		plannerErr := sel.Err()
-
-		if plannerErr != nil {
-			if input.validate {
-				return plannerErr
-			}
-			if plan == nil {
-				return plannerErr
-			}
-		}
-		eventName := sel.EventName()
-
+		// check if we should just list the workflows
 		list, err := cmd.Flags().GetBool("list")
 		if err != nil {
 			return err
 		}
-		if list {
-			err = printList(plan)
-			if err != nil {
-				return err
-			}
-			return plannerErr
+
+		// check if we should just validate the workflows
+		if input.validate {
+			return err
 		}
 
+		// check if we should just draw the graph
 		graph, err := cmd.Flags().GetBool("graph")
 		if err != nil {
 			return err
 		}
-		if graph {
-			err = drawGraph(plan)
+
+		// collect all events from loaded workflows
+		events := planner.GetEvents()
+
+		// plan with filtered jobs - to be used for filtering only
+		var filterPlan *model.Plan
+
+		// Determine the event name to be filtered
+		var filterEventName string
+
+		if len(args) > 0 {
+			log.Debugf("Using first passed in arguments event for filtering: %s", args[0])
+			filterEventName = args[0]
+		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+			// set default event type to first event from many available
+			// this way user dont have to specify the event.
+			log.Debugf("Using first detected workflow event for filtering: %s", events[0])
+			filterEventName = events[0]
+		}
+
+		var plannerErr error
+		if jobID != "" {
+			log.Debugf("Preparing plan with a job: %s", jobID)
+			filterPlan, plannerErr = planner.PlanJob(jobID)
+		} else if filterEventName != "" {
+			log.Debugf("Preparing plan for a event: %s", filterEventName)
+			filterPlan, plannerErr = planner.PlanEvent(filterEventName)
+		} else {
+			log.Debugf("Preparing plan with all jobs")
+			filterPlan, plannerErr = planner.PlanAll()
+		}
+		if filterPlan == nil && plannerErr != nil {
+			return plannerErr
+		}
+
+		if list {
+			err = printList(filterPlan)
 			if err != nil {
 				return err
 			}
 			return plannerErr
 		}
 
-		if input.validate {
+		if graph {
+			err = drawGraph(filterPlan)
+			if err != nil {
+				return err
+			}
 			return plannerErr
 		}
 
+		// plan with triggered jobs
+		var plan *model.Plan
+
+		// Determine the event name to be triggered
+		var eventName string
+
+		if len(args) > 0 {
+			log.Debugf("Using first passed in arguments event: %s", args[0])
+			eventName = args[0]
+		} else if len(events) == 1 && len(events[0]) > 0 {
+			log.Debugf("Using the only detected workflow event: %s", events[0])
+			eventName = events[0]
+		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+			// set default event type to first event from many available
+			// this way user dont have to specify the event.
+			log.Debugf("Using first detected workflow event: %s", events[0])
+			eventName = events[0]
+		} else {
+			log.Debugf("Using default workflow event: push")
+			eventName = "push"
+		}
+
+		// build the plan for this run
+		if jobID != "" {
+			log.Debugf("Planning job: %s", jobID)
+			plan, plannerErr = planner.PlanJob(jobID)
+		} else {
+			log.Debugf("Planning jobs for event: %s", eventName)
+			plan, plannerErr = planner.PlanEvent(eventName)
+		}
+		if plan != nil {
+			if len(plan.Stages) == 0 {
+				plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
+			}
+		}
+		if plan == nil && plannerErr != nil {
+			return plannerErr
+		}
+
+		// check to see if the main branch was defined
 		defaultbranch, err := cmd.Flags().GetString("defaultbranch")
 		if err != nil {
 			return err
 		}
 
+		// Check if platforms flag is set, if not, run default image survey
 		if len(input.platforms) == 0 {
 			cfgFound := false
 			cfgLocations := configLocations()
@@ -616,6 +581,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 				}
 			}
 			if !cfgFound && len(cfgLocations) > 0 {
+				// The first config location refers to the global config folder one
 				if err := defaultImageSurvey(cfgLocations[0]); err != nil {
 					log.Fatal(err)
 				}
@@ -636,6 +602,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", input.containerCapDrop))
 		}
 
+		// run the plan
 		config := &runner.Config{
 			Actor:                              input.actor,
 			EventName:                          eventName,
