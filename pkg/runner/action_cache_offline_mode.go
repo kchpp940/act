@@ -14,17 +14,14 @@ type GoGitActionCacheOfflineMode struct {
 	Parent GoGitActionCache
 }
 
-func (c GoGitActionCacheOfflineMode) Fetch(ctx context.Context, ar *actionRef) (string, error) {
+func (c GoGitActionCacheOfflineMode) Fetch(ctx context.Context, cacheDir, url, ref, token string) (string, error) {
 	logger := common.Logger(ctx)
-	cacheDir := ar.RepoCacheKey()
-	url := ar.CloneURL()
-	ref := ar.GitRefSpec()
 
 	gitPath := path.Join(c.Parent.Path, safeFilename(cacheDir)+".git")
 
 	logger.Infof("GoGitActionCacheOfflineMode fetch content %s with ref %s at %s", url, ref, gitPath)
 
-	sha, fetchErr := c.Parent.Fetch(ctx, ar)
+	sha, fetchErr := c.Parent.Fetch(ctx, cacheDir, url, ref, token)
 	gogitrepo, err := git.PlainOpen(gitPath)
 	if err != nil {
 		return "", fetchErr
@@ -40,10 +37,7 @@ func (c GoGitActionCacheOfflineMode) Fetch(ctx context.Context, ar *actionRef) (
 			_ = gogitrepo.Storer.SetReference(ref)
 		}
 	} else if err == nil {
-		logger.Infof("GoGitActionCacheOfflineMode using cached ref %s -> %s", ref, r.Hash().String())
 		return r.Hash().String(), nil
-	} else {
-		return "", ar.OfflineError()
 	}
 	return sha, fetchErr
 }

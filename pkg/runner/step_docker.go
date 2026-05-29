@@ -72,15 +72,48 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 			entrypoint = []string{entry}
 		}
 
-		stepContainer := sd.newStepContainer(ctx, image, cmd, entrypoint)
+		cfg := DockerStepConfig{
+			StepID:     step.ID,
+			Image:      image,
+			Entrypoint: entrypoint,
+			Cmd:        cmd,
+			Env:        sd.env,
+		}
+
+		spec, err := rc.newDockerStepRuntimeSpec(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to create docker step spec: %w", err)
+		}
+
+		rawLogger := common.Logger(ctx).WithField("raw_output", true)
+		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
+			if rc.Config.LogOutput {
+				rawLogger.Infof("%s", s)
+			} else {
+				rawLogger.Debugf("%s", s)
+			}
+			return true
+		})
+
+		spec.WorkingDir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
+		spec.Stdout = logWriter
+		spec.Stderr = logWriter
+
+		stepContainer := ContainerNewContainer(spec.ToNewContainerInput())
+
+		shouldForcePull := !spec.ShouldSkipPull()
+		forcePull := spec.ShouldForcePull()
+		shouldRemove := spec.ShouldRemove()
+
+		pullExec := stepContainer.Pull(forcePull).IfBool(shouldForcePull)
 
 		return common.NewPipelineExecutor(
-			stepContainer.Pull(rc.Config.ForcePull),
-			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+			pullExec,
+			stepContainer.Remove().IfBool(shouldRemove),
 			stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 			stepContainer.Start(true),
 		).Finally(
-			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+			stepContainer.Remove().IfBool(shouldRemove),
 		).Finally(stepContainer.Close())(ctx)
 	}
 }
@@ -88,48 +121,3 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 var (
 	ContainerNewContainer = container.NewContainer
 )
-
-func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd []string, entrypoint []string) container.Container {
-	rc := sd.RunContext
-	step := sd.Step
-
-	rawLogger := common.Logger(ctx).WithField("raw_output", true)
-	logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-		if rc.Config.LogOutput {
-			rawLogger.Infof("%s", s)
-		} else {
-			rawLogger.Debugf("%s", s)
-		}
-		return true
-	})
-	envList := make([]string, 0)
-	for k, v := range sd.env {
-		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
-
-	binds, mounts := rc.GetBindsAndMounts()
-	stepContainer := ContainerNewContainer(&container.NewContainerInput{
-		Cmd:         cmd,
-		Entrypoint:  entrypoint,
-		WorkingDir:  rc.JobContainer.ToContainerPath(rc.Config.Workdir),
-		Image:       image,
-		Username:    rc.Config.Secrets["DOCKER_USERNAME"],
-		Password:    rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:        createContainerName(rc.jobContainerName(), step.ID),
-		Env:         envList,
-		Mounts:      mounts,
-		NetworkMode: fmt.Sprintf("container:%s", rc.jobContainerName()),
-		Binds:       binds,
-		Stdout:      logWriter,
-		Stderr:      logWriter,
-		Privileged:  rc.Config.Privileged,
-		UsernsMode:  rc.Config.UsernsMode,
-		Platform:    rc.Config.ContainerArchitecture,
-	})
-	return stepContainer
-}

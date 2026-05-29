@@ -23,7 +23,7 @@ import (
 )
 
 type ActionCache interface {
-	Fetch(ctx context.Context, ar *actionRef) (string, error)
+	Fetch(ctx context.Context, cacheDir, url, ref, token string) (string, error)
 	GetTarArchive(ctx context.Context, cacheDir, sha, includePrefix string) (io.ReadCloser, error)
 }
 
@@ -31,12 +31,8 @@ type GoGitActionCache struct {
 	Path string
 }
 
-func (c GoGitActionCache) Fetch(ctx context.Context, ar *actionRef) (string, error) {
+func (c GoGitActionCache) Fetch(ctx context.Context, cacheDir, url, ref, token string) (string, error) {
 	logger := common.Logger(ctx)
-	cacheDir := ar.RepoCacheKey()
-	url := ar.CloneURL()
-	ref := ar.GitRefSpec()
-	token := ar.Token
 
 	gitPath := path.Join(c.Path, safeFilename(cacheDir)+".git")
 

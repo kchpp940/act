@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,172 +17,9 @@ import (
 	"github.com/kballard/go-shellquote"
 
 	"github.com/nektos/act/pkg/common"
-	"github.com/nektos/act/pkg/common/git"
 	"github.com/nektos/act/pkg/container"
 	"github.com/nektos/act/pkg/model"
 )
-
-type actionRef struct {
-	Host         string
-	Org          string
-	Repo         string
-	Path         string
-	Ref          string
-	Token        string
-	IsGHE        bool
-	IsAction     bool
-	RawUses      string
-	OfflineMode  bool
-}
-
-func (ar *actionRef) CloneURL() string {
-	return fmt.Sprintf("https://%s/%s/%s", ar.Host, ar.Org, ar.Repo)
-}
-
-func (ar *actionRef) RepoCacheKey() string {
-	return fmt.Sprintf("%s/%s/%s", ar.Host, ar.Org, ar.Repo)
-}
-
-func (ar *actionRef) ExecutionCacheKey() string {
-	kind := "action"
-	if !ar.IsAction {
-		kind = "workflow"
-	}
-	if ar.Path != "" {
-		return fmt.Sprintf("%s/%s/%s/%s/%s@%s", ar.Host, kind, ar.Org, ar.Repo, ar.Path, ar.Ref)
-	}
-	return fmt.Sprintf("%s/%s/%s/%s@%s", ar.Host, kind, ar.Org, ar.Repo, ar.Ref)
-}
-
-func (ar *actionRef) NormalizedUses() string {
-	if ar.IsAction {
-		if ar.Path != "" {
-			return fmt.Sprintf("%s/%s/%s@%s", ar.Org, ar.Repo, ar.Path, ar.Ref)
-		}
-		return fmt.Sprintf("%s/%s@%s", ar.Org, ar.Repo, ar.Ref)
-	}
-	return fmt.Sprintf("%s/%s/%s@%s", ar.Org, ar.Repo, ar.Path, ar.Ref)
-}
-
-func (ar *actionRef) GitRefSpec() string {
-	if strings.HasPrefix(ar.Ref, "refs/") {
-		return ar.Ref
-	}
-	if regexp.MustCompile(`^[0-9a-fA-F]{40}$`).MatchString(ar.Ref) {
-		return ar.Ref
-	}
-	return fmt.Sprintf("refs/heads/%s", ar.Ref)
-}
-
-func (ar *actionRef) ExecutionDir() string {
-	return safeFilename(ar.ExecutionCacheKey())
-}
-
-func (ar *actionRef) OfflineError() error {
-	return fmt.Errorf("unable to resolve action `%s` in offline mode, was it already cached?", ar.RawUses)
-}
-
-func (ar *actionRef) FetchError(cause error) error {
-	return fmt.Errorf("failed to fetch \"%s\" version \"%s\": %w", ar.CloneURL(), ar.Ref, cause)
-}
-
-func (ar *actionRef) GitCloneInput(dir string) git.NewGitCloneExecutorInput {
-	return git.NewGitCloneExecutorInput{
-		URL:         ar.CloneURL(),
-		Ref:         ar.Ref,
-		Dir:         dir,
-		Token:       ar.Token,
-		OfflineMode: ar.OfflineMode,
-	}
-}
-
-func newRemoteActionRef(uses string, githubCtx *model.GithubContext, config *Config) *actionRef {
-	ar := &actionRef{
-		IsAction:    true,
-		RawUses:    uses,
-		OfflineMode: config.ActionOfflineMode,
-	}
-
-	host := "github.com"
-	if githubCtx != nil && githubCtx.ServerURL != "" {
-		if u, err := url.Parse(githubCtx.ServerURL); err == nil {
-			host = u.Host
-		}
-	}
-	ar.Host = host
-	ar.IsGHE = host != "github.com"
-
-	ar.Token = config.Token
-	if githubCtx != nil && githubCtx.Token != "" {
-		ar.Token = githubCtx.Token
-	}
-
-	r := regexp.MustCompile(`^([^/@]+)/([^/@]+)(/([^@]*))?(@(.*))?$`)
-	matches := r.FindStringSubmatch(uses)
-	if len(matches) >= 7 && matches[6] != "" {
-		ar.Org = matches[1]
-		ar.Repo = matches[2]
-		ar.Path = matches[4]
-		ar.Ref = matches[6]
-	} else {
-		return nil
-	}
-
-	for _, action := range config.ReplaceGheActionWithGithubCom {
-		if strings.EqualFold(fmt.Sprintf("%s/%s", ar.Org, ar.Repo), action) {
-			ar.Host = "github.com"
-			ar.IsGHE = false
-			ar.Token = config.ReplaceGheActionTokenWithGithubCom
-			break
-		}
-	}
-
-	return ar
-}
-
-func newReusableWorkflowRef(uses string, githubCtx *model.GithubContext, config *Config) *actionRef {
-	ar := &actionRef{
-		IsAction:    false,
-		RawUses:    uses,
-		OfflineMode: config.ActionOfflineMode,
-	}
-
-	host := "github.com"
-	if githubCtx != nil && githubCtx.ServerURL != "" {
-		if u, err := url.Parse(githubCtx.ServerURL); err == nil {
-			host = u.Host
-		}
-	}
-	ar.Host = host
-	ar.IsGHE = host != "github.com"
-
-	ar.Token = config.Token
-	if githubCtx != nil && githubCtx.Token != "" {
-		ar.Token = githubCtx.Token
-	}
-
-	r := regexp.MustCompile(`^([^/]+)/([^/]+)/.github/workflows/([^@]+)@(.*)$`)
-	matches := r.FindStringSubmatch(uses)
-	if len(matches) == 5 {
-		ar.Org = matches[1]
-		ar.Repo = matches[2]
-		ar.Path = fmt.Sprintf(".github/workflows/%s", matches[3])
-		ar.Ref = matches[4]
-	} else {
-		return nil
-	}
-
-	for _, action := range config.ReplaceGheActionWithGithubCom {
-		if strings.EqualFold(fmt.Sprintf("%s/%s", ar.Org, ar.Repo), action) {
-			ar.Host = "github.com"
-			ar.IsGHE = false
-			ar.Token = config.ReplaceGheActionTokenWithGithubCom
-			break
-		}
-	}
-
-	return ar
-}
 
 type actionStep interface {
 	step
@@ -199,7 +35,7 @@ type actionYamlReader func(filename string) (io.Reader, io.Closer, error)
 
 type fileWriter func(filename string, data []byte, perm fs.FileMode) error
 
-type runAction func(step actionStep, actionDir string, _ *actionRef) common.Executor
+type runAction func(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor
 
 //go:embed res/trampoline.js
 var trampoline embed.FS
@@ -299,7 +135,7 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 
 	if rc.Config != nil && rc.Config.ActionCache != nil {
 		raction := step.(*stepActionRemote)
-		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.actionRef.RepoCacheKey(), raction.resolvedSha, "")
+		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.cacheDir, raction.resolvedSha, "")
 		if err != nil {
 			return err
 		}
@@ -314,21 +150,21 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 	return rc.JobContainer.CopyDir(containerActionDirCopy, actionDir+"/", rc.Config.UseGitIgnore)(ctx)
 }
 
-func runActionImpl(step actionStep, actionDir string, actionRef *actionRef) common.Executor {
+func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor {
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
 
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		actionPath := ""
-		if actionRef != nil && actionRef.Path != "" {
-			actionPath = actionRef.Path
+		if remoteAction != nil && remoteAction.Path != "" {
+			actionPath = remoteAction.Path
 		}
 
 		action := step.getActionModel()
 		logger.Debugf("About to run action %v", action)
 
-		err := setupActionEnv(ctx, step, actionRef)
+		err := setupActionEnv(ctx, step, remoteAction)
 		if err != nil {
 			return err
 		}
@@ -351,11 +187,11 @@ func runActionImpl(step actionStep, actionDir string, actionRef *actionRef) comm
 
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
 		case x.IsDocker():
-			if actionRef == nil {
+			if remoteAction == nil {
 				actionDir = ""
 				actionPath = containerActionDir
 			}
-			return execAsDocker(ctx, step, actionName, actionDir, actionPath, actionRef == nil, "entrypoint")
+			return execAsDocker(ctx, step, actionName, actionDir, actionPath, remoteAction == nil, "entrypoint")
 		case x.IsComposite():
 			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
 				return err
@@ -375,7 +211,7 @@ func runActionImpl(step actionStep, actionDir string, actionRef *actionRef) comm
 	}
 }
 
-func setupActionEnv(ctx context.Context, step actionStep, _ *actionRef) error {
+func setupActionEnv(ctx context.Context, step actionStep, _ *remoteAction) error {
 	rc := step.getRunContext()
 
 	// A few fields in the environment (e.g. GITHUB_ACTION_REPOSITORY)
@@ -416,17 +252,25 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 
 	var prepImage common.Executor
 	var image string
-	forcePull := false
+	var isDockerImage bool
+
+	cfg := ActionContainerConfig{
+		StepID: step.getStepModel().ID,
+		Env:    *step.getEnv(),
+	}
+	spec := rc.newBaseContainerRuntimeSpec(ctx)
+
 	if strings.HasPrefix(action.Runs.Image, "docker://") {
 		image = strings.TrimPrefix(action.Runs.Image, "docker://")
-		// Apply forcePull only for prebuild docker images
-		forcePull = rc.Config.ForcePull
+		isDockerImage = true
+		spec.Image = image
 	} else {
 		// "-dockeraction" enshures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
 		image = fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(actionName, "-"), "latest")
 		image = fmt.Sprintf("act-%s", strings.TrimLeft(image, "-"))
 		image = strings.ToLower(image)
-		contextDir, fileName := path.Split(path.Join(subpath, action.Runs.Image))
+		spec.Image = image
+		spec.BuildContext, spec.DockerfilePath = path.Split(path.Join(subpath, action.Runs.Image))
 
 		anyArchExists, err := container.ImageExistsLocally(ctx, image, "any")
 		if err != nil {
@@ -446,28 +290,29 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 			if !wasRemoved {
 				return fmt.Errorf("failed to remove image '%s'", image)
 			}
+			correctArchExists = false
 		}
 
-		if !correctArchExists || rc.Config.ForceRebuild {
-			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, contextDir)
+		if spec.ShouldBuild(!correctArchExists) {
+			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, spec.BuildContext)
 			var buildContext io.ReadCloser
 			if localAction {
-				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, contextDir+"/.")
+				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, spec.BuildContext+"/.")
 				if err != nil {
 					return err
 				}
 				defer buildContext.Close()
 			} else if rc.Config.ActionCache != nil {
 				rstep := step.(*stepActionRemote)
-				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.actionRef.RepoCacheKey(), rstep.resolvedSha, contextDir)
+				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, spec.BuildContext)
 				if err != nil {
 					return err
 				}
 				defer buildContext.Close()
 			}
 			prepImage = container.NewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
-				ContextDir:   filepath.Join(basedir, contextDir),
-				Dockerfile:   fileName,
+				ContextDir:   filepath.Join(basedir, spec.BuildContext),
+				Dockerfile:   spec.DockerfilePath,
 				ImageTag:     image,
 				BuildContext: buildContext,
 				Platform:     rc.Config.ContainerArchitecture,
@@ -507,15 +352,51 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 			entrypoint = nil
 		}
 	}
-	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint)
+
+	cfg.Image = image
+	cfg.Entrypoint = entrypoint
+	cfg.Cmd = cmd
+	actionSpec, err := rc.newActionContainerRuntimeSpec(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create action container spec: %w", err)
+	}
+
+	rawLogger := common.Logger(ctx).WithField("raw_output", true)
+	logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
+		if rc.Config.LogOutput {
+			rawLogger.Infof("%s", s)
+		} else {
+			rawLogger.Debugf("%s", s)
+		}
+		return true
+	})
+
+	if rc.IsHostEnv(ctx) {
+		ext := container.LinuxContainerEnvironmentExtensions{}
+		actionSpec.WorkingDir = ext.ToContainerPath(rc.Config.Workdir)
+	} else {
+		actionSpec.WorkingDir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
+	}
+
+	actionSpec.Stdout = logWriter
+	actionSpec.Stderr = logWriter
+
+	stepContainer := container.NewContainer(actionSpec.ToNewContainerInput())
+
+	shouldForcePull := isDockerImage && !actionSpec.ShouldSkipPull()
+	forcePull := isDockerImage && actionSpec.ShouldForcePull()
+	shouldRemove := actionSpec.ShouldRemove()
+
+	pullExec := stepContainer.Pull(forcePull).IfBool(shouldForcePull)
+
 	return common.NewPipelineExecutor(
 		prepImage,
-		stepContainer.Pull(forcePull),
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+		pullExec,
+		stepContainer.Remove().IfBool(shouldRemove),
 		stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
 		stepContainer.Start(true),
 	).Finally(
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+		stepContainer.Remove().IfBool(shouldRemove),
 	).Finally(stepContainer.Close())(ctx)
 }
 
@@ -546,60 +427,6 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	for k, v := range *step.getEnv() {
 		(*step.getEnv())[k] = ee.Interpolate(ctx, v)
 	}
-}
-
-func newStepContainer(ctx context.Context, step step, image string, cmd []string, entrypoint []string) container.Container {
-	rc := step.getRunContext()
-	stepModel := step.getStepModel()
-	rawLogger := common.Logger(ctx).WithField("raw_output", true)
-	logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
-		if rc.Config.LogOutput {
-			rawLogger.Infof("%s", s)
-		} else {
-			rawLogger.Debugf("%s", s)
-		}
-		return true
-	})
-	envList := make([]string, 0)
-	for k, v := range *step.getEnv() {
-		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
-
-	binds, mounts := rc.GetBindsAndMounts()
-	networkMode := fmt.Sprintf("container:%s", rc.jobContainerName())
-	var workdir string
-	if rc.IsHostEnv(ctx) {
-		networkMode = "default"
-		ext := container.LinuxContainerEnvironmentExtensions{}
-		workdir = ext.ToContainerPath(rc.Config.Workdir)
-	} else {
-		workdir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
-	}
-	stepContainer := container.NewContainer(&container.NewContainerInput{
-		Cmd:         cmd,
-		Entrypoint:  entrypoint,
-		WorkingDir:  workdir,
-		Image:       image,
-		Username:    rc.Config.Secrets["DOCKER_USERNAME"],
-		Password:    rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:        createContainerName(rc.jobContainerName(), stepModel.ID),
-		Env:         envList,
-		Mounts:      mounts,
-		NetworkMode: networkMode,
-		Binds:       binds,
-		Stdout:      logWriter,
-		Stderr:      logWriter,
-		Privileged:  rc.Config.Privileged,
-		UsernsMode:  rc.Config.UsernsMode,
-		Platform:    rc.Config.ContainerArchitecture,
-		Options:     rc.Config.ContainerOptions,
-	})
-	return stepContainer
 }
 
 func populateEnvsFromSavedState(env *map[string]string, step actionStep, rc *RunContext) {
@@ -695,12 +522,8 @@ func runPreStep(step actionStep) common.Executor {
 		var actionPath string
 		var remoteAction *stepActionRemote
 		if remote, ok := step.(*stepActionRemote); ok {
-			if remote.actionRef != nil {
-				actionPath = remote.actionRef.Path
-				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), remote.actionRef.ExecutionDir())
-			} else {
-				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
-			}
+			actionPath = newRemoteAction(stepModel.Uses).Path
+			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
 			remoteAction = remote
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
@@ -803,12 +626,8 @@ func runPostStep(step actionStep) common.Executor {
 		var actionPath string
 		var remoteAction *stepActionRemote
 		if remote, ok := step.(*stepActionRemote); ok {
-			if remote.actionRef != nil {
-				actionPath = remote.actionRef.Path
-				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), remote.actionRef.ExecutionDir())
-			} else {
-				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
-			}
+			actionPath = newRemoteAction(stepModel.Uses).Path
+			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
 			remoteAction = remote
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)

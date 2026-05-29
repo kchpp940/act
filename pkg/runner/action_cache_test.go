@@ -18,44 +18,46 @@ func TestActionCache(t *testing.T) {
 		Path: os.TempDir(),
 	}
 	ctx := context.Background()
+	cacheDir := "nektos/act-test-actions"
+	repo := "https://github.com/nektos/act-test-actions"
 	refs := []struct {
-		Name  string
-		Uses  string
-		Ar    *actionRef
-		SubPath string
+		Name     string
+		CacheDir string
+		Repo     string
+		Ref      string
 	}{
 		{
-			Name:    "Fetch Branch Name",
-			Uses:    "nektos/act-test-actions@main",
-			SubPath: "js",
+			Name:     "Fetch Branch Name",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "main",
 		},
 		{
-			Name:    "Fetch Branch Name Absolutely",
-			Uses:    "nektos/act-test-actions@refs/heads/main",
-			SubPath: "js",
+			Name:     "Fetch Branch Name Absolutely",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "refs/heads/main",
 		},
 		{
-			Name:    "Fetch HEAD",
-			Uses:    "nektos/act-test-actions@HEAD",
-			SubPath: "js",
+			Name:     "Fetch HEAD",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "HEAD",
 		},
 		{
-			Name:    "Fetch Sha",
-			Uses:    "nektos/act-test-actions@de984ca37e4df4cb9fd9256435a3b82c4a2662b1",
-			SubPath: "js",
+			Name:     "Fetch Sha",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "de984ca37e4df4cb9fd9256435a3b82c4a2662b1",
 		},
 	}
 	for _, c := range refs {
 		t.Run(c.Name, func(_ *testing.T) {
-			ar := newRemoteActionRef(c.Uses, nil, &Config{})
-			if !a.NotNil(ar) {
-				return
-			}
-			sha, err := cache.Fetch(ctx, ar)
+			sha, err := cache.Fetch(ctx, c.CacheDir, c.Repo, c.Ref, "")
 			if !a.NoError(err) || !a.NotEmpty(sha) {
 				return
 			}
-			atar, err := cache.GetTarArchive(ctx, ar.RepoCacheKey(), sha, c.SubPath)
+			atar, err := cache.GetTarArchive(ctx, c.CacheDir, sha, "js")
 			if !a.NoError(err) || !a.NotEmpty(atar) {
 				return
 			}
@@ -80,46 +82,61 @@ func TestActionCacheFailures(t *testing.T) {
 		Path: os.TempDir(),
 	}
 	ctx := context.Background()
+	cacheDir := "nektos/act-test-actions"
+	repo := "https://github.com/nektos/act-test-actions-not-exist"
+	repoExist := "https://github.com/nektos/act-test-actions"
 	refs := []struct {
-		Name string
-		Uses string
+		Name     string
+		CacheDir string
+		Repo     string
+		Ref      string
 	}{
 		{
-			Name: "Fetch Branch Name",
-			Uses: "nektos/act-test-actions-not-exist@main",
+			Name:     "Fetch Branch Name",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "main",
 		},
 		{
-			Name: "Fetch Branch Name Absolutely",
-			Uses: "nektos/act-test-actions-not-exist@refs/heads/main",
+			Name:     "Fetch Branch Name Absolutely",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "refs/heads/main",
 		},
 		{
-			Name: "Fetch HEAD",
-			Uses: "nektos/act-test-actions-not-exist@HEAD",
+			Name:     "Fetch HEAD",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "HEAD",
 		},
 		{
-			Name: "Fetch Sha",
-			Uses: "nektos/act-test-actions-not-exist@de984ca37e4df4cb9fd9256435a3b82c4a2662b1",
+			Name:     "Fetch Sha",
+			CacheDir: cacheDir,
+			Repo:     repo,
+			Ref:      "de984ca37e4df4cb9fd9256435a3b82c4a2662b1",
 		},
 		{
-			Name: "Fetch Branch Name no existing",
-			Uses: "nektos/act-test-actions@main2",
+			Name:     "Fetch Branch Name no existing",
+			CacheDir: cacheDir,
+			Repo:     repoExist,
+			Ref:      "main2",
 		},
 		{
-			Name: "Fetch Branch Name Absolutely no existing",
-			Uses: "nektos/act-test-actions@refs/heads/main2",
+			Name:     "Fetch Branch Name Absolutely no existing",
+			CacheDir: cacheDir,
+			Repo:     repoExist,
+			Ref:      "refs/heads/main2",
 		},
 		{
-			Name: "Fetch Sha no existing",
-			Uses: "nektos/act-test-actions@de984ca37e4df4cb9fd9256435a3b82c4a2662b2",
+			Name:     "Fetch Sha no existing",
+			CacheDir: cacheDir,
+			Repo:     repoExist,
+			Ref:      "de984ca37e4df4cb9fd9256435a3b82c4a2662b2",
 		},
 	}
 	for _, c := range refs {
 		t.Run(c.Name, func(t *testing.T) {
-			ar := newRemoteActionRef(c.Uses, nil, &Config{})
-			if !a.NotNil(ar) {
-				return
-			}
-			_, err := cache.Fetch(ctx, ar)
+			_, err := cache.Fetch(ctx, c.CacheDir, c.Repo, c.Ref, "")
 			t.Logf("%s\n", err)
 			if !a.Error(err) {
 				return

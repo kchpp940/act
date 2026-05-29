@@ -242,7 +242,7 @@ func TestActionRunner(t *testing.T) {
 
 			tt.step.getRunContext().JobContainer = cm
 
-			err := runActionImpl(tt.step, "dir", newRemoteActionRef("org/repo/path@ref", nil, &Config{}))(ctx)
+			err := runActionImpl(tt.step, "dir", newRemoteAction("org/repo/path@ref"))(ctx)
 
 			assert.Nil(t, err)
 			cm.AssertExpectations(t)
