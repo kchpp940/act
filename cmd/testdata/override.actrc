@@ -1,0 +1,7 @@
+--env-file .env.from-config
+--secret-file .secrets.from-config
+--var-file .vars.from-config
+--input-file .input.from-config
+--eventpath event.from-config.json
+--workflows ./workflows-from-config
+-C ./config-workdir

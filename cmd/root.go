@@ -134,37 +134,51 @@ func createRootCommand(ctx context.Context, input *Input, version string) *cobra
 	return rootCmd
 }
 
-// Return locations where Act's config can be found in order: XDG spec, .actrc in HOME directory, .actrc in invocation directory
-func configLocations() []string {
+// Return locations where Act's config can be found in order: XDG spec, .actrc in HOME directory, .actrc in workdir
+func configLocations(workdir string) []string {
 	configFileName := ".actrc"
 
 	homePath := filepath.Join(UserHomeDir, configFileName)
-	invocationPath := filepath.Join(".", configFileName)
+	workdirPath := filepath.Join(workdir, configFileName)
 
-	// Though named xdg, adrg's lib support macOS and Windows config paths as well
-	// It also takes cares of creating the parent folder so we don't need to bother later
 	specPath, err := xdg.ConfigFile("act/actrc")
 	if err != nil {
 		specPath = homePath
 	}
 
-	// This order should be enforced since the survey part relies on it
-	return []string{specPath, homePath, invocationPath}
+	return []string{specPath, homePath, workdirPath}
+}
+
+func parseWorkdir(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-C" || arg == "--directory" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		} else if strings.HasPrefix(arg, "-C=") {
+			return strings.TrimPrefix(arg, "-C=")
+		} else if strings.HasPrefix(arg, "--directory=") {
+			return strings.TrimPrefix(arg, "--directory=")
+		}
+	}
+	return "."
 }
 
 func args() []string {
-	actrc := configLocations()
+	workdir := parseWorkdir(os.Args[1:])
+	actrc := configLocations(workdir)
 
 	args := make([]string, 0)
 	for _, f := range actrc {
-		args = append(args, readArgsFile(f, true)...)
+		args = append(args, readArgsFile(f, true, true)...)
 	}
 
 	args = append(args, os.Args[1:]...)
 	return args
 }
 
-func bugReport(ctx context.Context, version string) error {
+func bugReport(ctx context.Context, version string, workdir string) error {
 	sprintf := func(key, val string) string {
 		return fmt.Sprintf("%-24s%s\n", key, val)
 	}
@@ -195,8 +209,8 @@ func bugReport(ctx context.Context, version string) error {
 	}
 
 	report += sprintf("Config files:", "")
-	for _, c := range configLocations() {
-		args := readArgsFile(c, false)
+	for _, c := range configLocations(workdir) {
+		args := readArgsFile(c, false, false)
 		if len(args) > 0 {
 			report += fmt.Sprintf("\t%s:\n", c)
 			for _, l := range args {
@@ -275,7 +289,89 @@ func listOptions(cmd *cobra.Command) error {
 	return err
 }
 
-func readArgsFile(file string, split bool) []string {
+var pathArgs = map[string]bool{
+	"env-file":        true,
+	"secret-file":     true,
+	"var-file":        true,
+	"input-file":      true,
+	"eventpath":       true,
+	"workflows":       true,
+	"directory":       true,
+	"artifact-server-path": true,
+	"cache-server-path":    true,
+	"action-cache-path":    true,
+}
+
+var shortToLongFlag = map[string]string{
+	"W": "workflows",
+	"C": "directory",
+	"e": "eventpath",
+	"a": "actor",
+	"P": "platform",
+	"s": "secret",
+	"r": "reuse",
+	"b": "bind",
+	"p": "pull",
+	"n": "dryrun",
+	"w": "watch",
+	"v": "verbose",
+	"q": "quiet",
+	"l": "list",
+	"g": "graph",
+	"j": "job",
+}
+
+func resolvePathArg(argName, argValue, baseDir string) string {
+	if baseDir == "" || argValue == "" || filepath.IsAbs(argValue) {
+		return argValue
+	}
+	if !pathArgs[argName] {
+		return argValue
+	}
+	resolved := filepath.Join(baseDir, argValue)
+	if absPath, err := filepath.Abs(resolved); err == nil {
+		return absPath
+	}
+	return resolved
+}
+
+func parseArgName(arg string) (name string, hasValue bool, value string) {
+	arg = strings.TrimLeft(arg, "-")
+	if strings.Contains(arg, "=") {
+		parts := strings.SplitN(arg, "=", 2)
+		name = parts[0]
+		if longName, ok := shortToLongFlag[name]; ok {
+			name = longName
+		}
+		return name, true, parts[1]
+	}
+	name = arg
+	if longName, ok := shortToLongFlag[name]; ok {
+		name = longName
+	}
+	return name, false, ""
+}
+
+func splitFlagAndValue(arg string) (flagPart string, name string, hasValue bool, value string) {
+	flagPart = arg
+	arg = strings.TrimLeft(arg, "-")
+	if strings.Contains(arg, "=") {
+		parts := strings.SplitN(arg, "=", 2)
+		name = parts[0]
+		hasValue = true
+		value = parts[1]
+	} else {
+		name = arg
+		hasValue = false
+		value = ""
+	}
+	if longName, ok := shortToLongFlag[name]; ok {
+		name = longName
+	}
+	return flagPart, name, hasValue, value
+}
+
+func readArgsFile(file string, split bool, resolvePaths bool) []string {
 	args := make([]string, 0)
 	f, err := os.Open(file)
 	if err != nil {
@@ -287,17 +383,70 @@ func readArgsFile(file string, split bool) []string {
 			log.Errorf("Failed to close args file: %v", err)
 		}
 	}()
+
+	baseDir := filepath.Dir(file)
+	if !resolvePaths {
+		baseDir = ""
+	}
+
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(nil, 1024*1024*1024) // increase buffer to 1GB to avoid scanner buffer overflow
+	scanner.Buffer(nil, 1024*1024*1024)
+	var pendingPathArg string
+	var pendingPathArgName string
+
 	for scanner.Scan() {
 		arg := os.ExpandEnv(strings.TrimSpace(scanner.Text()))
 
 		if strings.HasPrefix(arg, "-") && split {
-			args = append(args, regexp.MustCompile(`\s`).Split(arg, 2)...)
+			parts := regexp.MustCompile(`\s`).Split(arg, 2)
+
+			if pendingPathArg != "" {
+				args = append(args, pendingPathArg)
+				pendingPathArg = ""
+				pendingPathArgName = ""
+			}
+
+			if len(parts) == 2 {
+				_, name, hasValue, value := splitFlagAndValue(parts[0])
+				if hasValue {
+					if pathArgs[name] {
+						eqIdx := strings.Index(parts[0], "=")
+						parts[0] = parts[0][:eqIdx+1] + resolvePathArg(name, value, baseDir)
+					}
+				} else if pathArgs[name] {
+					parts[1] = resolvePathArg(name, parts[1], baseDir)
+				}
+				args = append(args, parts...)
+			} else {
+				flagPart, name, hasValue, value := splitFlagAndValue(parts[0])
+				if hasValue {
+					if pathArgs[name] {
+						eqIdx := strings.Index(flagPart, "=")
+						parts[0] = flagPart[:eqIdx+1] + resolvePathArg(name, value, baseDir)
+					}
+					args = append(args, parts...)
+				} else if pathArgs[name] {
+					pendingPathArg = parts[0]
+					pendingPathArgName = name
+				} else {
+					args = append(args, parts...)
+				}
+			}
 		} else if !split {
+			args = append(args, arg)
+		} else if pendingPathArg != "" {
+			args = append(args, pendingPathArg, resolvePathArg(pendingPathArgName, arg, baseDir))
+			pendingPathArg = ""
+			pendingPathArgName = ""
+		} else {
 			args = append(args, arg)
 		}
 	}
+
+	if pendingPathArg != "" {
+		args = append(args, pendingPathArg)
+	}
+
 	return args
 }
 
@@ -397,7 +546,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		if ok, _ := cmd.Flags().GetBool("bug-report"); ok {
 			ctx, cancel := common.EarlyCancelContext(ctx)
 			defer cancel()
-			return bugReport(ctx, cmd.Version)
+			return bugReport(ctx, cmd.Version, input.Workdir())
 		}
 		if ok, _ := cmd.Flags().GetBool("man-page"); ok {
 			return generateManPage(cmd)
@@ -573,7 +722,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		// Check if platforms flag is set, if not, run default image survey
 		if len(input.platforms) == 0 {
 			cfgFound := false
-			cfgLocations := configLocations()
+			cfgLocations := configLocations(input.Workdir())
 			for _, v := range cfgLocations {
 				_, err := os.Stat(v)
 				if os.IsExist(err) {
@@ -585,7 +734,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 				if err := defaultImageSurvey(cfgLocations[0]); err != nil {
 					log.Fatal(err)
 				}
-				input.platforms = readArgsFile(cfgLocations[0], true)
+				input.platforms = readArgsFile(cfgLocations[0], true, true)
 			}
 		}
 		deprecationWarning := "--%s is deprecated and will be removed soon, please switch to cli: `--container-options \"%[2]s\"` or `.actrc`: `--container-options %[2]s`."
@@ -602,17 +751,23 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", input.containerCapDrop))
 		}
 
+		resolvedWorkdir := input.Workdir()
+		resolvedEventPath := input.EventPath()
+		resolvedActionCacheDir := input.ActionCachePath()
+		resolvedArtifactServerPath := input.ArtifactServerPath()
+		resolvedCacheServerPath := input.CacheServerPath()
+
 		// run the plan
 		config := &runner.Config{
 			Actor:                              input.actor,
 			EventName:                          eventName,
-			EventPath:                          input.EventPath(),
+			EventPath:                          resolvedEventPath,
 			DefaultBranch:                      defaultbranch,
 			ForcePull:                          !input.actionOfflineMode && input.forcePull,
 			ForceRebuild:                       input.forceRebuild,
 			ReuseContainers:                    input.reuseContainers,
-			Workdir:                            input.Workdir(),
-			ActionCacheDir:                     input.actionCachePath,
+			Workdir:                            resolvedWorkdir,
+			ActionCacheDir:                     resolvedActionCacheDir,
 			ActionOfflineMode:                  input.actionOfflineMode,
 			BindWorkdir:                        input.bindWorkdir,
 			LogOutput:                          !input.noOutput,
@@ -635,7 +790,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			ContainerCapAdd:                    input.containerCapAdd,
 			ContainerCapDrop:                   input.containerCapDrop,
 			AutoRemove:                         input.autoRemove,
-			ArtifactServerPath:                 input.artifactServerPath,
+			ArtifactServerPath:                 resolvedArtifactServerPath,
 			ArtifactServerAddr:                 input.artifactServerAddr,
 			ArtifactServerPort:                 input.artifactServerPort,
 			NoSkipCheckout:                     input.noSkipCheckout,
@@ -676,13 +831,13 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return err
 		}
 
-		cancel := artifacts.Serve(ctx, input.artifactServerPath, input.artifactServerAddr, input.artifactServerPort)
+		cancel := artifacts.Serve(ctx, resolvedArtifactServerPath, input.artifactServerAddr, input.artifactServerPort)
 
 		const cacheURLKey = "ACTIONS_CACHE_URL"
 		var cacheHandler *artifactcache.Handler
 		if !input.noCacheServer && envs[cacheURLKey] == "" {
 			var err error
-			cacheHandler, err = artifactcache.StartHandler(input.cacheServerPath, input.cacheServerExternalURL, input.cacheServerAddr, input.cacheServerPort, common.Logger(ctx))
+			cacheHandler, err = artifactcache.StartHandler(resolvedCacheServerPath, input.cacheServerExternalURL, input.cacheServerAddr, input.cacheServerPort, common.Logger(ctx))
 			if err != nil {
 				return err
 			}
@@ -693,7 +848,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		if watch, err := cmd.Flags().GetBool("watch"); err != nil {
 			return err
 		} else if watch {
-			err = watchAndRun(ctx, r.NewPlanExecutor(plan))
+			err = watchAndRun(ctx, r.NewPlanExecutor(plan), input.Workdir())
 			if err != nil {
 				return err
 			}
@@ -716,7 +871,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 func defaultImageSurvey(actrc string) error {
 	var answer string
 	confirmation := &survey.Select{
-		Message: "Please choose the default image you want to use with act:\n  - Large size image: ca. 17GB download + 53.1GB storage, you will need 75GB of free disk space, snapshots of GitHub Hosted Runners without snap and pulled docker images\n  - Medium size image: ~500MB, includes only necessary tools to bootstrap actions and aims to be compatible with most actions\n  - Micro size image: <200MB, contains only NodeJS required to bootstrap actions, doesn't work with all actions\n\nDefault image and other options can be changed manually in " + configLocations()[0] + " (please refer to https://nektosact.com/usage/index.html?highlight=configur#configuration-file for additional information about file structure)",
+		Message: "Please choose the default image you want to use with act:\n  - Large size image: ca. 17GB download + 53.1GB storage, you will need 75GB of free disk space, snapshots of GitHub Hosted Runners without snap and pulled docker images\n  - Medium size image: ~500MB, includes only necessary tools to bootstrap actions and aims to be compatible with most actions\n  - Micro size image: <200MB, contains only NodeJS required to bootstrap actions, doesn't work with all actions\n\nDefault image and other options can be changed manually in " + configLocations(".")[0] + " (please refer to https://nektosact.com/usage/index.html?highlight=configur#configuration-file for additional information about file structure)",
 		Help:    "If you want to know why act asks you that, please go to https://github.com/nektos/act/issues/107",
 		Default: "Medium",
 		Options: []string{"Large", "Medium", "Micro"},
@@ -756,10 +911,14 @@ func defaultImageSurvey(actrc string) error {
 	return nil
 }
 
-func watchAndRun(ctx context.Context, fn common.Executor) error {
-	dir, err := os.Getwd()
-	if err != nil {
-		return err
+func watchAndRun(ctx context.Context, fn common.Executor, workdir string) error {
+	dir := workdir
+	if dir == "" {
+		var err error
+		dir, err = os.Getwd()
+		if err != nil {
+			return err
+		}
 	}
 
 	ignoreFile := filepath.Join(dir, ".gitignore")
