@@ -58,7 +58,6 @@ type Config struct {
 	RemoteName                         string                       // remote name in local git repo config
 	ReplaceGheActionWithGithubCom      []string                     // Use actions from GitHub Enterprise instance to GitHub
 	ReplaceGheActionTokenWithGithubCom string                       // Token of private action repo on GitHub.
-	Matrix                             map[string]map[string]bool   // Matrix config to run
 	ContainerNetworkMode               docker_container.NetworkMode // the network mode of job containers (the value of --network)
 	ActionCache                        ActionCache                  // Use a custom ActionCache Implementation
 	ConcurrentJobs                     int                          // Number of max concurrent jobs
@@ -168,45 +167,39 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 					}
 				}
 
-				var matrixes []map[string]interface{}
-				if m, err := job.GetMatrixes(); err != nil {
-					log.Errorf("Error while get job's matrix: %v", err)
-				} else {
-					log.Debugf("Job Matrices: %v", m)
-					log.Debugf("Runner Matrices: %v", runner.config.Matrix)
-					matrixes = selectMatrixes(m, runner.config.Matrix)
+				matrix := run.Matrix
+				if matrix == nil {
+					matrix = make(map[string]interface{})
 				}
-				log.Debugf("Final matrix after applying user inclusions '%v'", matrixes)
+				log.Debugf("Run Matrix (from planner expansion): %v", matrix)
 
 				maxParallel := 4
 				if job.Strategy != nil {
 					maxParallel = job.Strategy.MaxParallel
 				}
 
-				if len(matrixes) < maxParallel {
-					maxParallel = len(matrixes)
+				if maxParallel > 1 && len(matrix) == 0 {
+					maxParallel = 1
 				}
 
-				for i, matrix := range matrixes {
-					rc := runner.newRunContext(ctx, run, matrix)
-					rc.JobName = rc.Name
-					if len(matrixes) > 1 {
-						rc.Name = fmt.Sprintf("%s-%d", rc.Name, i+1)
-					}
-					if len(rc.String()) > maxJobNameLen {
-						maxJobNameLen = len(rc.String())
-					}
-					stageExecutor = append(stageExecutor, func(ctx context.Context) error {
-						jobName := fmt.Sprintf("%-*s", maxJobNameLen, rc.String())
-						executor, err := rc.Executor()
-
-						if err != nil {
-							return err
-						}
-
-						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix)))
-					})
+				rc := runner.newRunContext(ctx, run, matrix)
+				rc.JobName = rc.Name
+				if run.MatrixKey != "" {
+					rc.Name = fmt.Sprintf("%s (%s)", rc.Name, run.MatrixKey)
 				}
+				if len(rc.String()) > maxJobNameLen {
+					maxJobNameLen = len(rc.String())
+				}
+				stageExecutor = append(stageExecutor, func(ctx context.Context) error {
+					jobName := fmt.Sprintf("%-*s", maxJobNameLen, rc.String())
+					executor, err := rc.Executor()
+
+					if err != nil {
+						return err
+					}
+
+					return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix, run.MatrixKey)))
+				})
 				pipeline = append(pipeline, common.NewParallelExecutor(maxParallel, stageExecutor...))
 			}
 
@@ -229,25 +222,6 @@ func handleFailure(plan *model.Plan) common.Executor {
 		}
 		return nil
 	}
-}
-
-func selectMatrixes(originalMatrixes []map[string]interface{}, targetMatrixValues map[string]map[string]bool) []map[string]interface{} {
-	matrixes := make([]map[string]interface{}, 0)
-	for _, original := range originalMatrixes {
-		flag := true
-		for key, val := range original {
-			if allowedVals, ok := targetMatrixValues[key]; ok {
-				valToString := fmt.Sprintf("%v", val)
-				if _, ok := allowedVals[valToString]; !ok {
-					flag = false
-				}
-			}
-		}
-		if flag {
-			matrixes = append(matrixes, original)
-		}
-	}
-	return matrixes
 }
 
 func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, matrix map[string]interface{}) *RunContext {

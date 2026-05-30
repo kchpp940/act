@@ -70,7 +70,7 @@ func WithJobLoggerFactory(ctx context.Context, factory JobLoggerFactory) context
 }
 
 // WithJobLogger attaches a new logger to context that is aware of steps
-func WithJobLogger(ctx context.Context, jobID string, jobName string, config *Config, masks *[]string, matrix map[string]interface{}) context.Context {
+func WithJobLogger(ctx context.Context, jobID string, jobName string, config *Config, masks *[]string, matrix map[string]interface{}, matrixKey string) context.Context {
 	ctx = WithMasks(ctx, masks)
 
 	var logger *logrus.Logger
@@ -101,10 +101,11 @@ func WithJobLogger(ctx context.Context, jobID string, jobName string, config *Co
 		masker:    valueMasker(config.InsecureSecrets, config.Secrets),
 	})
 	rtn := logger.WithFields(logrus.Fields{
-		"job":    jobName,
-		"jobID":  jobID,
-		"dryrun": common.Dryrun(ctx),
-		"matrix": matrix,
+		"job":       jobName,
+		"jobID":     jobID,
+		"dryrun":    common.Dryrun(ctx),
+		"matrix":    matrix,
+		"matrixKey": matrixKey,
 	}).WithContext(ctx)
 
 	return common.WithLogger(ctx, rtn)

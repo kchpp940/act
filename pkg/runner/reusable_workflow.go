@@ -70,6 +70,11 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 			return err
 		}
 
+		plan, err = planner.ExpandMatrix(plan)
+		if err != nil {
+			return err
+		}
+
 		runner, err := NewReusableWorkflowRunner(rc)
 		if err != nil {
 			return err
@@ -121,6 +126,11 @@ func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow stri
 		}
 
 		plan, err := planner.PlanEvent("workflow_call")
+		if err != nil {
+			return err
+		}
+
+		plan, err = planner.ExpandMatrix(plan)
 		if err != nil {
 			return err
 		}
