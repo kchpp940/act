@@ -17,6 +17,7 @@ import (
 	"github.com/adrg/xdg"
 	"github.com/andreaskoch/go-fswatch"
 	"github.com/joho/godotenv"
+	docker_container "github.com/moby/moby/api/types/container"
 	gitignore "github.com/sabhiram/go-gitignore"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -129,8 +130,7 @@ func createRootCommand(ctx context.Context, input *Input, version string) *cobra
 	rootCmd.PersistentFlags().StringArrayVarP(&input.localRepository, "local-repository", "", []string{}, "Replaces the specified repository and ref with a local folder (e.g. https://github.com/test/test@v0=/home/act/test or test/test@v0=/home/act/test, the latter matches any hosts or protocols)")
 	rootCmd.PersistentFlags().BoolVar(&input.listOptions, "list-options", false, "Print a json structure of compatible options")
 	rootCmd.PersistentFlags().IntVar(&input.concurrentJobs, "concurrent-jobs", 0, "Maximum number of concurrent jobs to run. Default is the number of CPUs available.")
-	rootCmd.Flags().BoolVar(&input.preview, "preview", false, "Show execution preview without starting containers")
-	rootCmd.Flags().BoolVar(&input.previewJson, "preview-json", false, "Show execution preview as JSON without starting containers")
+	rootCmd.AddCommand(newCacheCommand())
 	rootCmd.SetArgs(args())
 	return rootCmd
 }
@@ -459,76 +459,59 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return err
 		}
 
+		// check if we should just list the workflows
 		list, err := cmd.Flags().GetBool("list")
 		if err != nil {
 			return err
 		}
 
+		// check if we should just validate the workflows
 		if input.validate {
 			return err
 		}
 
+		// check if we should just draw the graph
 		graph, err := cmd.Flags().GetBool("graph")
 		if err != nil {
 			return err
 		}
 
+		// collect all events from loaded workflows
 		events := planner.GetEvents()
 
-		defaultbranch, err := cmd.Flags().GetString("defaultbranch")
-		if err != nil {
-			return err
-		}
+		// plan with filtered jobs - to be used for filtering only
+		var filterPlan *model.Plan
 
-		var eventName string
+		// Determine the event name to be filtered
+		var filterEventName string
+
 		if len(args) > 0 {
-			eventName = args[0]
-			log.Debugf("Using passed in event: %s", eventName)
-		} else if len(events) == 1 && len(events[0]) > 0 {
-			eventName = events[0]
-			log.Debugf("Using the only detected workflow event: %s", eventName)
+			log.Debugf("Using first passed in arguments event for filtering: %s", args[0])
+			filterEventName = args[0]
 		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
-			eventName = events[0]
-			log.Debugf("Using first detected workflow event: %s", eventName)
-		} else {
-			eventName = "push"
-			log.Debugf("Using default workflow event: %s", eventName)
+			// set default event type to first event from many available
+			// this way user dont have to specify the event.
+			log.Debugf("Using first detected workflow event for filtering: %s", events[0])
+			filterEventName = events[0]
 		}
 
-		var plan *model.Plan
 		var plannerErr error
 		if jobID != "" {
-			log.Debugf("Planning job: %s", jobID)
-			plan, plannerErr = planner.PlanJob(jobID)
+			log.Debugf("Preparing plan with a job: %s", jobID)
+			filterPlan, plannerErr = planner.PlanJob(jobID)
+		} else if filterEventName != "" {
+			log.Debugf("Preparing plan for a event: %s", filterEventName)
+			filterPlan, plannerErr = planner.PlanEvent(filterEventName)
 		} else {
-			log.Debugf("Planning jobs for event: %s", eventName)
-			plan, plannerErr = planner.PlanEvent(eventName)
+			log.Debugf("Preparing plan with all jobs")
+			filterPlan, plannerErr = planner.PlanAll()
 		}
-		if plan == nil && plannerErr != nil {
+		if filterPlan == nil && plannerErr != nil {
 			return plannerErr
-		}
-		if plan != nil && len(plan.Stages) == 0 {
-			plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
-		}
-
-		var pp *runner.PreviewPlan
-		if plan != nil {
-			pp, err = newPreviewPlan(ctx, input, plan, eventName, defaultbranch, envs, secrets, vars, inputs, matrixes)
-			if err != nil {
-				log.Warnf("Failed to generate preview plan: %v", err)
-			}
 		}
 
 		if list {
-			if pp != nil {
-				if input.preview || input.previewJson {
-					err = printPreview(pp, input.previewJson)
-				} else {
-					printListFromPreview(pp)
-				}
-			} else if plan != nil {
-				err = printList(plan)
-			}
+			err = printList(filterPlan)
 			if err != nil {
 				return err
 			}
@@ -536,31 +519,59 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		if graph {
-			if pp != nil {
-				if input.preview || input.previewJson {
-					err = printPreview(pp, input.previewJson)
-				} else {
-					printGraphFromPreview(pp)
-				}
-			} else if plan != nil {
-				err = drawGraph(plan)
-			}
+			err = drawGraph(filterPlan)
 			if err != nil {
 				return err
 			}
 			return plannerErr
 		}
 
-		if input.preview || input.previewJson {
-			if pp != nil {
-				err = printPreview(pp, input.previewJson)
-				if err != nil {
-					return err
-				}
+		// plan with triggered jobs
+		var plan *model.Plan
+
+		// Determine the event name to be triggered
+		var eventName string
+
+		if len(args) > 0 {
+			log.Debugf("Using first passed in arguments event: %s", args[0])
+			eventName = args[0]
+		} else if len(events) == 1 && len(events[0]) > 0 {
+			log.Debugf("Using the only detected workflow event: %s", events[0])
+			eventName = events[0]
+		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+			// set default event type to first event from many available
+			// this way user dont have to specify the event.
+			log.Debugf("Using first detected workflow event: %s", events[0])
+			eventName = events[0]
+		} else {
+			log.Debugf("Using default workflow event: push")
+			eventName = "push"
+		}
+
+		// build the plan for this run
+		if jobID != "" {
+			log.Debugf("Planning job: %s", jobID)
+			plan, plannerErr = planner.PlanJob(jobID)
+		} else {
+			log.Debugf("Planning jobs for event: %s", eventName)
+			plan, plannerErr = planner.PlanEvent(eventName)
+		}
+		if plan != nil {
+			if len(plan.Stages) == 0 {
+				plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
 			}
+		}
+		if plan == nil && plannerErr != nil {
 			return plannerErr
 		}
 
+		// check to see if the main branch was defined
+		defaultbranch, err := cmd.Flags().GetString("defaultbranch")
+		if err != nil {
+			return err
+		}
+
+		// Check if platforms flag is set, if not, run default image survey
 		if len(input.platforms) == 0 {
 			cfgFound := false
 			cfgLocations := configLocations()
@@ -571,6 +582,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 				}
 			}
 			if !cfgFound && len(cfgLocations) > 0 {
+				// The first config location refers to the global config folder one
 				if err := defaultImageSurvey(cfgLocations[0]); err != nil {
 					log.Fatal(err)
 				}
@@ -591,11 +603,81 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", input.containerCapDrop))
 		}
 
-		if pp == nil || pp.RunnerConfig == nil {
-			return fmt.Errorf("failed to generate runner configuration")
+		// run the plan
+		config := &runner.Config{
+			Actor:                              input.actor,
+			EventName:                          eventName,
+			EventPath:                          input.EventPath(),
+			DefaultBranch:                      defaultbranch,
+			ForcePull:                          !input.actionOfflineMode && input.forcePull,
+			ForceRebuild:                       input.forceRebuild,
+			ReuseContainers:                    input.reuseContainers,
+			Workdir:                            input.Workdir(),
+			ActionCacheDir:                     input.actionCachePath,
+			ActionOfflineMode:                  input.actionOfflineMode,
+			BindWorkdir:                        input.bindWorkdir,
+			LogOutput:                          !input.noOutput,
+			JSONLogger:                         input.jsonLogger,
+			LogPrefixJobID:                     input.logPrefixJobID,
+			Env:                                envs,
+			Secrets:                            secrets,
+			Vars:                               vars,
+			Inputs:                             inputs,
+			Token:                              secrets["GITHUB_TOKEN"],
+			InsecureSecrets:                    input.insecureSecrets,
+			Platforms:                          input.newPlatforms(),
+			Privileged:                         input.privileged,
+			UsernsMode:                         input.usernsMode,
+			ContainerArchitecture:              input.containerArchitecture,
+			ContainerDaemonSocket:              input.containerDaemonSocket,
+			ContainerOptions:                   input.containerOptions,
+			UseGitIgnore:                       input.useGitIgnore,
+			GitHubInstance:                     input.githubInstance,
+			ContainerCapAdd:                    input.containerCapAdd,
+			ContainerCapDrop:                   input.containerCapDrop,
+			AutoRemove:                         input.autoRemove,
+			ArtifactServerPath:                 input.artifactServerPath,
+			ArtifactServerAddr:                 input.artifactServerAddr,
+			ArtifactServerPort:                 input.artifactServerPort,
+			NoSkipCheckout:                     input.noSkipCheckout,
+			RemoteName:                         input.remoteName,
+			ReplaceGheActionWithGithubCom:      input.replaceGheActionWithGithubCom,
+			ReplaceGheActionTokenWithGithubCom: input.replaceGheActionTokenWithGithubCom,
+			Matrix:                             matrixes,
+			ContainerNetworkMode:               docker_container.NetworkMode(input.networkName),
+			ConcurrentJobs:                     input.concurrentJobs,
 		}
-
-		r, err := runner.New(pp.RunnerConfig)
+		if input.useNewActionCache || len(input.localRepository) > 0 {
+			if input.actionOfflineMode {
+				config.ActionCache = &runner.GoGitActionCacheOfflineMode{
+					Parent: runner.GoGitActionCache{
+						Path: config.ActionCacheDir,
+					},
+				}
+			} else {
+				config.ActionCache = &runner.GoGitActionCache{
+					Path: config.ActionCacheDir,
+				}
+			}
+			if len(input.localRepository) > 0 {
+				localRepositories := map[string]string{}
+				for _, l := range input.localRepository {
+					k, v, _ := strings.Cut(l, "=")
+					localRepositories[k] = v
+				}
+				config.ActionCache = &runner.LocalRepositoryCache{
+					Parent:            config.ActionCache,
+					LocalRepositories: localRepositories,
+					CacheDirCache:     map[string]string{},
+				}
+			}
+			metaManager := runner.NewActionCacheMetaManager(config.ActionCacheDir)
+			config.ActionCache = &runner.ActionCacheWithMeta{
+				Parent: config.ActionCache,
+				Meta:   metaManager,
+			}
+		}
+		r, err := runner.New(config)
 		if err != nil {
 			return err
 		}
