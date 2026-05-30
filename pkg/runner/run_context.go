@@ -53,6 +53,64 @@ type RunContext struct {
 	caller              *caller // job calling this RunContext (reusable workflows)
 	Cancelled           bool
 	nodeToolFullPath    string
+	JobRuntimeScope     *container.RuntimeScope
+	stateVersion        uint64
+}
+
+func (rc *RunContext) GetStateVersion() uint64 {
+	return rc.stateVersion
+}
+
+func (rc *RunContext) IncrementStateVersion() {
+	rc.stateVersion++
+}
+
+func (rc *RunContext) GetActionPath() string {
+	return rc.ActionPath
+}
+
+func (rc *RunContext) GetConfig() *Config {
+	return rc.Config
+}
+
+func (rc *RunContext) GetRun() *model.Run {
+	return rc.Run
+}
+
+func (rc *RunContext) GetRawMatrix() map[string]interface{} {
+	return rc.Matrix
+}
+
+func (rc *RunContext) GetEventJSON() string {
+	return rc.EventJSON
+}
+
+func (rc *RunContext) GetRawEnv() map[string]string {
+	return rc.Env
+}
+
+func (rc *RunContext) GetRawStepResults() map[string]*model.StepResult {
+	return rc.StepResults
+}
+
+func (rc *RunContext) GetJobContainer() container.ExecutionsEnvironment {
+	return rc.JobContainer
+}
+
+func (rc *RunContext) GetCurrentStep() string {
+	return rc.CurrentStep
+}
+
+func (rc *RunContext) GetCancelled() bool {
+	return rc.Cancelled
+}
+
+func (rc *RunContext) GetCaller() *caller {
+	return rc.caller
+}
+
+func (rc *RunContext) GetExprEval() ExpressionEvaluator {
+	return rc.ExprEval
 }
 
 func (rc *RunContext) AddMask(mask string) {
@@ -274,34 +332,31 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		logger.Infof("\U0001f680  Start image=%s", image)
 		name := rc.jobContainerName()
 
-		envList := make([]string, 0)
-
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
-		envList = append(envList, fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")) // Use same locale as GitHub Actions
-
 		ext := container.LinuxContainerEnvironmentExtensions{}
 		binds, mounts := rc.GetBindsAndMounts()
 
-		// specify the network to which the container will connect when `docker create` stage. (like execute command line: docker create --network <networkName> <image>)
-		// if using service containers, will create a new network for the containers.
-		// and it will be removed after at last.
 		networkName, createAndDeleteNetwork := rc.networkName()
 
-		// add service containers
+		scopeID := container.JobScopeID(rc.JobName)
+		rc.JobRuntimeScope = container.NewRuntimeScope(scopeID, rc.JobName)
+
+		if createAndDeleteNetwork {
+			rc.JobRuntimeScope.WithNetwork(&container.NetworkSpec{
+				Name:              networkName,
+				Mode:              networkName,
+				Lifecycle:         container.NetworkLifecycleCreateAndManage,
+				CreateIfNotExists: true,
+			})
+		}
+
+		serviceExecutors := make([]common.Executor, 0)
 		for serviceID, spec := range rc.Run.Job().Services {
-			// interpolate env
 			interpolatedEnvs := make(map[string]string, len(spec.Env))
 			for k, v := range spec.Env {
 				interpolatedEnvs[k] = rc.ExprEval.Interpolate(ctx, v)
 			}
-			envs := make([]string, 0, len(interpolatedEnvs))
-			for k, v := range interpolatedEnvs {
-				envs = append(envs, fmt.Sprintf("%s=%s", k, v))
-			}
-			username, password, err = rc.handleServiceCredentials(ctx, spec.Credentials)
+
+			svcUsername, svcPassword, err := rc.handleServiceCredentials(ctx, spec.Credentials)
 			if err != nil {
 				return fmt.Errorf("failed to handle service %s credentials: %w", serviceID, err)
 			}
@@ -328,27 +383,96 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			}
 
 			serviceContainerName := createContainerName(rc.jobContainerName(), serviceID)
-			c := container.NewContainer(&container.NewContainerInput{
-				Name:           serviceContainerName,
-				WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-				Image:          imageName,
-				Username:       username,
-				Password:       password,
-				Env:            envs,
-				Mounts:         serviceMounts,
-				Binds:          serviceBinds,
-				Stdout:         logWriter,
-				Stderr:         logWriter,
-				Privileged:     rc.Config.Privileged,
-				UsernsMode:     rc.Config.UsernsMode,
-				Platform:       rc.Config.ContainerArchitecture,
-				Options:        rc.ExprEval.Interpolate(ctx, spec.Options),
-				NetworkMode:    networkName,
-				NetworkAliases: []string{serviceID},
-				ExposedPorts:   exposedPorts,
-				PortBindings:   portBindings,
-			})
-			rc.ServiceContainers = append(rc.ServiceContainers, c)
+
+			svcBuilder := container.NewRuntimeSpecBuilder(container.NewServiceRuntimeSpec()).
+				WithScopeID(scopeID).
+				WithManagedByScope(true).
+				WithName(serviceContainerName).
+				WithImage(imageName).
+				WithWorkingDir(ext.ToContainerPath(rc.Config.Workdir)).
+				WithCredentials(svcUsername, svcPassword).
+				WithEnvMap(interpolatedEnvs).
+				WithBinds(serviceBinds).
+				WithMounts(serviceMounts).
+				WithStdout(logWriter).
+				WithStderr(logWriter).
+				WithPrivileged(rc.Config.Privileged).
+				WithUsernsMode(rc.Config.UsernsMode).
+				WithPlatform(rc.Config.ContainerArchitecture).
+				WithOptions(rc.ExprEval.Interpolate(ctx, spec.Options)).
+				WithNetworkMode(networkName).
+				WithNetworkAliases([]string{serviceID}).
+				WithExposedPorts(exposedPorts).
+				WithPortBindings(portBindings).
+				WithForcePull(rc.Config.ForcePull).
+				WithCapabilities(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).
+				WithAttach(false).
+				WithWait(false)
+
+			svcScopedExecutor := rc.JobRuntimeScope.ContainerExecutor(svcBuilder.Build())
+			rc.ServiceContainers = append(rc.ServiceContainers, svcScopedExecutor.Environment())
+
+			serviceExecutors = append(serviceExecutors, common.NewPipelineExecutor(
+				svcScopedExecutor.Container().Pull(rc.Config.ForcePull).IfNot(common.Dryrun),
+				svcScopedExecutor.Container().Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).IfNot(common.Dryrun),
+				svcScopedExecutor.Container().Start(false).IfNot(common.Dryrun),
+			))
+		}
+
+		jobContainerNetwork := rc.Config.ContainerNetworkMode.NetworkName()
+		if rc.containerImage(ctx) != "" {
+			jobContainerNetwork = networkName
+		} else if jobContainerNetwork == "" {
+			jobContainerNetwork = "host"
+		}
+
+		jobBuilder := container.NewRuntimeSpecBuilder(container.NewJobRuntimeSpec()).
+			WithScopeID(scopeID).
+			WithName(name).
+			WithImage(image).
+			WithWorkingDir(ext.ToContainerPath(rc.Config.Workdir)).
+			WithCredentials(username, password).
+			WithDefaultRunnerEnv(ctx).
+			WithEnv([]string{fmt.Sprintf("%s=%s", "LANG", "C.UTF-8")}).
+			WithBinds(binds).
+			WithMounts(mounts).
+			WithNetworkMode(jobContainerNetwork).
+			WithNetworkAliases([]string{rc.Name}).
+			WithStdout(logWriter).
+			WithStderr(logWriter).
+			WithPrivileged(rc.Config.Privileged).
+			WithUsernsMode(rc.Config.UsernsMode).
+			WithPlatform(rc.Config.ContainerArchitecture).
+			WithOptions(rc.options(ctx)).
+			WithForcePull(rc.Config.ForcePull).
+			WithReuseContainer(rc.Config.ReuseContainers).
+			WithCapabilities(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).
+			WithAttach(false).
+			WithWait(false).
+			WithCopyFiles(
+				&container.FileEntry{
+					Name: "workflow/event.json",
+					Mode: 0o644,
+					Body: rc.EventJSON,
+				},
+				&container.FileEntry{
+					Name: "workflow/envs.txt",
+					Mode: 0o666,
+					Body: "",
+				},
+			)
+
+		if createAndDeleteNetwork {
+			jobBuilder = jobBuilder.
+				WithNetworkName(networkName).
+				WithNetworkLifecycle(container.NetworkLifecycleUseExisting)
+		}
+
+		jobSpec := jobBuilder.Build()
+		jobExecutor := container.NewContainerExecutor(jobSpec)
+		rc.JobContainer = jobExecutor.Environment()
+		if rc.JobContainer == nil {
+			return errors.New("Failed to create job container")
 		}
 
 		rc.cleanUpJobContainer = func(ctx context.Context) error {
@@ -361,21 +485,8 @@ func (rc *RunContext) startJobContainer() common.Executor {
 					Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName(), false)).IfNot(reuseJobContainer).
 					Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName()+"-env", false)).IfNot(reuseJobContainer).
 					Then(func(ctx context.Context) error {
-						if len(rc.ServiceContainers) > 0 {
-							logger.Infof("Cleaning up services for job %s", rc.JobName)
-							if err := rc.stopServiceContainers()(ctx); err != nil {
-								logger.Errorf("Error while cleaning services: %v", err)
-							}
-							if createAndDeleteNetwork {
-								// clean network if it has been created by act
-								// if using service containers
-								// it means that the network to which containers are connecting is created by `act_runner`,
-								// so, we should remove the network at last.
-								logger.Infof("Cleaning up network for job %s, and network name is: %s", rc.JobName, networkName)
-								if err := container.NewDockerNetworkRemoveExecutor(networkName)(ctx); err != nil {
-									logger.Errorf("Error while cleaning network: %v", err)
-								}
-							}
+						if rc.JobRuntimeScope != nil {
+							return rc.JobRuntimeScope.Cleanup()(ctx)
 						}
 						return nil
 					})(ctx)
@@ -383,45 +494,14 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			return nil
 		}
 
-		jobContainerNetwork := rc.Config.ContainerNetworkMode.NetworkName()
-		if rc.containerImage(ctx) != "" {
-			jobContainerNetwork = networkName
-		} else if jobContainerNetwork == "" {
-			jobContainerNetwork = "host"
-		}
-
-		rc.JobContainer = container.NewContainer(&container.NewContainerInput{
-			Cmd:            nil,
-			Entrypoint:     []string{"tail", "-f", "/dev/null"},
-			WorkingDir:     ext.ToContainerPath(rc.Config.Workdir),
-			Image:          image,
-			Username:       username,
-			Password:       password,
-			Name:           name,
-			Env:            envList,
-			Mounts:         mounts,
-			NetworkMode:    jobContainerNetwork,
-			NetworkAliases: []string{rc.Name},
-			Binds:          binds,
-			Stdout:         logWriter,
-			Stderr:         logWriter,
-			Privileged:     rc.Config.Privileged,
-			UsernsMode:     rc.Config.UsernsMode,
-			Platform:       rc.Config.ContainerArchitecture,
-			Options:        rc.options(ctx),
-		})
-		if rc.JobContainer == nil {
-			return errors.New("Failed to create job container")
-		}
-
 		return common.NewPipelineExecutor(
 			rc.pullServicesImages(rc.Config.ForcePull),
 			rc.JobContainer.Pull(rc.Config.ForcePull),
 			rc.stopJobContainer(),
-			container.NewDockerNetworkCreateExecutor(networkName).IfBool(createAndDeleteNetwork),
-			rc.startServiceContainers(networkName),
-			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
-			rc.JobContainer.Start(false),
+			rc.JobRuntimeScope.Setup().IfBool(createAndDeleteNetwork),
+			common.NewParallelExecutor(len(serviceExecutors), serviceExecutors...),
+			rc.JobContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).IfNot(common.Dryrun),
+			rc.JobContainer.Start(false).IfNot(common.Dryrun),
 			rc.JobContainer.Copy(rc.JobContainer.GetActPath()+"/", &container.FileEntry{
 				Name: "workflow/event.json",
 				Mode: 0o644,
@@ -430,7 +510,7 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				Name: "workflow/envs.txt",
 				Mode: 0o666,
 				Body: "",
-			}),
+			}).IfNot(common.Dryrun),
 			rc.waitForServiceContainers(),
 		)(ctx)
 	}

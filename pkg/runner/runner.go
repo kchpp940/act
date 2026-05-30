@@ -168,32 +168,45 @@ func (runner *runnerImpl) NewPlanExecutor(plan *model.Plan) common.Executor {
 					}
 				}
 
-				matrix := run.Matrix
-				if matrix == nil {
-					matrix = make(map[string]interface{})
+				var matrixes []map[string]interface{}
+				if m, err := job.GetMatrixes(); err != nil {
+					log.Errorf("Error while get job's matrix: %v", err)
+				} else {
+					log.Debugf("Job Matrices: %v", m)
+					log.Debugf("Runner Matrices: %v", runner.config.Matrix)
+					matrixes = selectMatrixes(m, runner.config.Matrix)
 				}
-				log.Debugf("Using matrix from planner: %v", matrix)
+				log.Debugf("Final matrix after applying user inclusions '%v'", matrixes)
 
 				maxParallel := 4
 				if job.Strategy != nil {
 					maxParallel = job.Strategy.MaxParallel
 				}
 
-				rc := runner.newRunContext(ctx, run, matrix)
-				rc.JobName = rc.Name
-				if len(rc.String()) > maxJobNameLen {
-					maxJobNameLen = len(rc.String())
+				if len(matrixes) < maxParallel {
+					maxParallel = len(matrixes)
 				}
-				stageExecutor = append(stageExecutor, func(ctx context.Context) error {
-					jobName := fmt.Sprintf("%-*s", maxJobNameLen, rc.String())
-					executor, err := rc.Executor()
 
-					if err != nil {
-						return err
+				for i, matrix := range matrixes {
+					rc := runner.newRunContext(ctx, run, matrix)
+					rc.JobName = rc.Name
+					if len(matrixes) > 1 {
+						rc.Name = fmt.Sprintf("%s-%d", rc.Name, i+1)
 					}
+					if len(rc.String()) > maxJobNameLen {
+						maxJobNameLen = len(rc.String())
+					}
+					stageExecutor = append(stageExecutor, func(ctx context.Context) error {
+						jobName := fmt.Sprintf("%-*s", maxJobNameLen, rc.String())
+						executor, err := rc.Executor()
 
-					return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix)))
-				})
+						if err != nil {
+							return err
+						}
+
+						return executor(common.WithJobErrorContainer(WithJobLogger(ctx, rc.Run.JobID, jobName, rc.Config, &rc.Masks, matrix)))
+					})
+				}
 				pipeline = append(pipeline, common.NewParallelExecutor(maxParallel, stageExecutor...))
 			}
 
@@ -216,6 +229,25 @@ func handleFailure(plan *model.Plan) common.Executor {
 		}
 		return nil
 	}
+}
+
+func selectMatrixes(originalMatrixes []map[string]interface{}, targetMatrixValues map[string]map[string]bool) []map[string]interface{} {
+	matrixes := make([]map[string]interface{}, 0)
+	for _, original := range originalMatrixes {
+		flag := true
+		for key, val := range original {
+			if allowedVals, ok := targetMatrixValues[key]; ok {
+				valToString := fmt.Sprintf("%v", val)
+				if _, ok := allowedVals[valToString]; !ok {
+					flag = false
+				}
+			}
+		}
+		if flag {
+			matrixes = append(matrixes, original)
+		}
+	}
+	return matrixes
 }
 
 func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, matrix map[string]interface{}) *RunContext {

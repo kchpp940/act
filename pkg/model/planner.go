@@ -13,187 +13,41 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// WorkflowPlanner contains methods for creating plans
 type WorkflowPlanner interface {
+	PlanEvent(eventName string) (*Plan, error)
+	PlanJob(jobName string) (*Plan, error)
+	PlanAll() (*Plan, error)
 	GetEvents() []string
-	NewPipeline() *PlannerPipeline
 }
 
-type SelectionPolicy struct {
-	Strategy   SelectionStrategy
-	EventName  string
-	JobID      string
-	AutoDetect bool
-	SelectAll  bool
-	Matrix     map[string]map[string]bool
-}
-
-type SelectionStrategy string
-
-const (
-	SelectionStrategyByEvent    SelectionStrategy = "by_event"
-	SelectionStrategyByJob      SelectionStrategy = "by_job"
-	SelectionStrategyAllJobs    SelectionStrategy = "all_jobs"
-	SelectionStrategyAutoDetect SelectionStrategy = "auto_detect"
-)
-
-func (s SelectionStrategy) String() string {
-	return string(s)
-}
-
-func SelectByEvent(eventName string) *SelectionPolicy {
-	return &SelectionPolicy{
-		Strategy:  SelectionStrategyByEvent,
-		EventName: eventName,
-	}
-}
-
-func SelectByJob(jobID string) *SelectionPolicy {
-	return &SelectionPolicy{
-		Strategy: SelectionStrategyByJob,
-		JobID:    jobID,
-	}
-}
-
-func SelectAllJobs() *SelectionPolicy {
-	return &SelectionPolicy{
-		Strategy:  SelectionStrategyAllJobs,
-		SelectAll: true,
-	}
-}
-
-func SelectWithAutoDetect() *SelectionPolicy {
-	return &SelectionPolicy{
-		Strategy:   SelectionStrategyAutoDetect,
-		AutoDetect: true,
-	}
-}
-
-func (s *SelectionPolicy) WithMatrix(matrix map[string]map[string]bool) *SelectionPolicy {
-	s.Matrix = matrix
-	return s
-}
-
-func (s *SelectionPolicy) WithAutoDetect(auto bool) *SelectionPolicy {
-	s.AutoDetect = auto
-	return s
-}
-
-type DiscoveryInput struct {
-	WorkflowsPath     string
-	NoWorkflowRecurse bool
-	Strict            bool
-}
-
-type DiscoverySummary struct {
-	WorkflowCount int
-	WorkflowNames []string
-}
-
-type DiscoveryResult struct {
-	Workflows []*Workflow
-	Summary   DiscoverySummary
-}
-
-type InferInput struct {
-	Workflows  []*Workflow
-	EventName  string
-	AutoDetect bool
-}
-
-type InferSummary struct {
-	RequestedEvent  string
-	AvailableEvents []string
-	SelectedEvent   string
-	WasAutoDetected bool
-}
-
-type InferResult struct {
-	EventName string
-	Summary   InferSummary
-}
-
-type SelectInput struct {
-	Workflows []*Workflow
-	EventName string
-	JobID     string
-	SelectAll bool
-}
-
-type SelectSummary struct {
-	SelectedJobCount int
-	SelectedJobs     []string
-	EventFilter      string
-	JobIDFilter      string
-	SelectAllEnabled bool
-}
-
-type SelectResult struct {
-	Jobs    []*SelectedJob
-	Summary SelectSummary
-}
-
-type ExpandInput struct {
-	SelectedJobs []*SelectedJob
-	MatrixFilter map[string]map[string]bool
-}
-
-type ExpandSummary struct {
-	JobCount             int
-	TotalMatrixCombos    int
-	FilteredMatrixCombos int
-}
-
-type ExpandResult struct {
-	Runs    []*Run
-	Summary ExpandSummary
-}
-
-type SortInput struct {
-	Runs []*Run
-}
-
-type SortSummary struct {
-	StageCount int
-	RunCount   int
-	SortErrors []string
-}
-
-type SortResult struct {
-	Plan    *Plan
-	Err     error
-	Summary SortSummary
-}
-
-type PlannerResult struct {
-	Plan             *Plan
-	EventName        string
-	Workflows        []*Workflow
-	Error            error
-	Policy           *SelectionPolicy
-	DiscoverySummary DiscoverySummary
-	InferSummary     InferSummary
-	SelectSummary    SelectSummary
-	ExpandSummary    ExpandSummary
-	SortSummary      SortSummary
-}
-
-type SelectedJob struct {
-	Workflow *Workflow
-	JobID    string
-}
-
+// Plan contains a list of stages to run in series
 type Plan struct {
 	Stages []*Stage
 }
 
+// Stage contains a list of runs to execute in parallel
 type Stage struct {
 	Runs []*Run
 }
 
+// Run represents a job from a workflow that needs to be run
 type Run struct {
 	Workflow *Workflow
 	JobID    string
-	Matrix   map[string]interface{}
+}
+
+func (r *Run) String() string {
+	jobName := r.Job().Name
+	if jobName == "" {
+		jobName = r.JobID
+	}
+	return jobName
+}
+
+// Job returns the job for this Run
+func (r *Run) Job() *Job {
+	return r.Workflow.GetJob(r.JobID)
 }
 
 type WorkflowFiles struct {
@@ -201,71 +55,9 @@ type WorkflowFiles struct {
 	dirPath          string
 }
 
-type PlannerPipeline struct {
-	workflows []*Workflow
-}
-
-func NewPlannerPipeline(workflows []*Workflow) *PlannerPipeline {
-	return &PlannerPipeline{
-		workflows: workflows,
-	}
-}
-
-func (p *PlannerPipeline) Execute(policy *SelectionPolicy) *PlannerResult {
-	return p.Run(policy)
-}
-
-func (p *PlannerPipeline) Run(policy *SelectionPolicy) *PlannerResult {
-	workflowNames := make([]string, 0, len(p.workflows))
-	for _, w := range p.workflows {
-		workflowNames = append(workflowNames, w.Name)
-	}
-	discoverResult := &DiscoveryResult{
-		Workflows: p.workflows,
-		Summary: DiscoverySummary{
-			WorkflowCount: len(p.workflows),
-			WorkflowNames: workflowNames,
-		},
-	}
-
-	inferResult := InferEvent(InferInput{
-		Workflows:  discoverResult.Workflows,
-		EventName:  policy.EventName,
-		AutoDetect: policy.AutoDetect,
-	})
-
-	selectResult := SelectJobs(SelectInput{
-		Workflows: discoverResult.Workflows,
-		EventName: inferResult.EventName,
-		JobID:     policy.JobID,
-		SelectAll: policy.SelectAll,
-	})
-
-	expandResult := ExpandMatrix(ExpandInput{
-		SelectedJobs: selectResult.Jobs,
-		MatrixFilter: policy.Matrix,
-	})
-
-	sortResult := SortRuns(SortInput{
-		Runs: expandResult.Runs,
-	})
-
-	return &PlannerResult{
-		Plan:             sortResult.Plan,
-		EventName:        inferResult.EventName,
-		Workflows:        discoverResult.Workflows,
-		Error:            sortResult.Err,
-		Policy:           policy,
-		DiscoverySummary: discoverResult.Summary,
-		InferSummary:     inferResult.Summary,
-		SelectSummary:    selectResult.Summary,
-		ExpandSummary:    expandResult.Summary,
-		SortSummary:      sortResult.Summary,
-	}
-}
-
-func DiscoverWorkflows(input DiscoveryInput) (*DiscoveryResult, error) {
-	path, err := filepath.Abs(input.WorkflowsPath)
+// NewWorkflowPlanner will load a specific workflow, all workflows from a directory or all workflows from a directory and its subdirectories
+func NewWorkflowPlanner(path string, noWorkflowRecurse, strict bool) (WorkflowPlanner, error) {
+	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +71,7 @@ func DiscoverWorkflows(input DiscoveryInput) (*DiscoveryResult, error) {
 
 	if fi.IsDir() {
 		log.Debugf("Loading workflows from '%s'", path)
-		if input.NoWorkflowRecurse {
+		if noWorkflowRecurse {
 			files, err := os.ReadDir(path)
 			if err != nil {
 				return nil, err
@@ -322,7 +114,7 @@ func DiscoverWorkflows(input DiscoveryInput) (*DiscoveryResult, error) {
 		})
 	}
 
-	result := &DiscoveryResult{}
+	wp := new(workflowPlanner)
 	for _, wf := range workflows {
 		ext := filepath.Ext(wf.workflowDirEntry.Name())
 		if ext == ".yml" || ext == ".yaml" {
@@ -332,7 +124,7 @@ func DiscoverWorkflows(input DiscoveryInput) (*DiscoveryResult, error) {
 			}
 
 			log.Debugf("Reading workflow '%s'", f.Name())
-			workflow, err := ReadWorkflow(f, input.Strict)
+			workflow, err := ReadWorkflow(f, strict)
 			if err != nil {
 				_ = f.Close()
 				if err == io.EOF {
@@ -357,289 +149,11 @@ func DiscoverWorkflows(input DiscoveryInput) (*DiscoveryResult, error) {
 				return nil, err
 			}
 
-			result.Workflows = append(result.Workflows, workflow)
+			wp.workflows = append(wp.workflows, workflow)
 			_ = f.Close()
 		}
 	}
 
-	result.Summary = DiscoverySummary{
-		WorkflowCount: len(result.Workflows),
-	}
-	for _, w := range result.Workflows {
-		result.Summary.WorkflowNames = append(result.Summary.WorkflowNames, w.Name)
-	}
-
-	return result, nil
-}
-
-func InferEvent(input InferInput) *InferResult {
-	availableEvents := getEventsFromWorkflows(input.Workflows)
-
-	if input.EventName != "" {
-		return &InferResult{
-			EventName: input.EventName,
-			Summary: InferSummary{
-				RequestedEvent:  input.EventName,
-				AvailableEvents: availableEvents,
-				SelectedEvent:   input.EventName,
-				WasAutoDetected: false,
-			},
-		}
-	}
-
-	if len(availableEvents) == 0 {
-		return &InferResult{
-			EventName: "",
-			Summary: InferSummary{
-				RequestedEvent:  "",
-				AvailableEvents: availableEvents,
-				SelectedEvent:   "",
-				WasAutoDetected: false,
-			},
-		}
-	}
-
-	if input.AutoDetect || len(availableEvents) == 1 {
-		log.Debugf("Using detected workflow event: %s", availableEvents[0])
-		return &InferResult{
-			EventName: availableEvents[0],
-			Summary: InferSummary{
-				RequestedEvent:  "",
-				AvailableEvents: availableEvents,
-				SelectedEvent:   availableEvents[0],
-				WasAutoDetected: true,
-			},
-		}
-	}
-
-	log.Debugf("Using default workflow event: push")
-	return &InferResult{
-		EventName: "push",
-		Summary: InferSummary{
-			RequestedEvent:  "",
-			AvailableEvents: availableEvents,
-			SelectedEvent:   "push",
-			WasAutoDetected: false,
-		},
-	}
-}
-
-func SelectJobs(input SelectInput) *SelectResult {
-	result := &SelectResult{
-		Summary: SelectSummary{
-			EventFilter:      input.EventName,
-			JobIDFilter:      input.JobID,
-			SelectAllEnabled: input.SelectAll,
-		},
-	}
-
-	if len(input.Workflows) == 0 {
-		log.Debug("no workflows found by planner")
-		return result
-	}
-
-	for _, w := range input.Workflows {
-		if input.JobID != "" {
-			if job := w.GetJob(input.JobID); job != nil {
-				result.Jobs = append(result.Jobs, &SelectedJob{
-					Workflow: w,
-					JobID:    input.JobID,
-				})
-			}
-		} else if input.SelectAll || input.EventName == "" {
-			for _, jobID := range w.GetJobIDs() {
-				result.Jobs = append(result.Jobs, &SelectedJob{
-					Workflow: w,
-					JobID:    jobID,
-				})
-			}
-		} else if input.EventName != "" {
-			events := w.On()
-			foundEvent := false
-			for _, e := range events {
-				if e == input.EventName {
-					foundEvent = true
-					for _, jobID := range w.GetJobIDs() {
-						result.Jobs = append(result.Jobs, &SelectedJob{
-							Workflow: w,
-							JobID:    jobID,
-						})
-					}
-				}
-			}
-			if !foundEvent {
-				log.Debugf("no events found for workflow: %s", w.File)
-			}
-		}
-	}
-
-	result.Summary.SelectedJobCount = len(result.Jobs)
-	for _, sj := range result.Jobs {
-		result.Summary.SelectedJobs = append(result.Summary.SelectedJobs, sj.JobID)
-	}
-
-	return result
-}
-
-func ExpandMatrix(input ExpandInput) *ExpandResult {
-	result := &ExpandResult{
-		Summary: ExpandSummary{
-			JobCount: len(input.SelectedJobs),
-		},
-	}
-
-	for _, sj := range input.SelectedJobs {
-		job := sj.Workflow.GetJob(sj.JobID)
-		if job == nil {
-			continue
-		}
-
-		matrixes, err := job.GetMatrixes()
-		if err != nil {
-			log.Warn(err)
-			matrixes = []map[string]interface{}{{}}
-		}
-		result.Summary.TotalMatrixCombos += len(matrixes)
-
-		filteredMatrixes := matrixes
-		if input.MatrixFilter != nil && len(input.MatrixFilter) > 0 {
-			filteredMatrixes = SelectMatrixes(matrixes, input.MatrixFilter)
-		}
-		result.Summary.FilteredMatrixCombos += len(filteredMatrixes)
-
-		for _, matrix := range filteredMatrixes {
-			run := &Run{
-				Workflow: sj.Workflow,
-				JobID:    sj.JobID,
-				Matrix:   matrix,
-			}
-			result.Runs = append(result.Runs, run)
-		}
-	}
-
-	return result
-}
-
-func SortRuns(input SortInput) *SortResult {
-	plan := new(Plan)
-	var lastErr error
-	summary := SortSummary{
-		RunCount: len(input.Runs),
-	}
-
-	workflowJobs := make(map[*Workflow][]*Run)
-	for _, r := range input.Runs {
-		workflowJobs[r.Workflow] = append(workflowJobs[r.Workflow], r)
-	}
-
-	for w, runs := range workflowJobs {
-		jobIDs := make([]string, 0, len(runs))
-		runMap := make(map[string]*Run)
-		for _, r := range runs {
-			jobIDs = append(jobIDs, r.JobID)
-			runMap[r.JobID] = r
-		}
-
-		stages, err := createStages(w, jobIDs...)
-		if err != nil {
-			log.Warn(err)
-			lastErr = err
-			summary.SortErrors = append(summary.SortErrors, err.Error())
-			continue
-		}
-
-		for _, stage := range stages {
-			for i, run := range stage.Runs {
-				if r, ok := runMap[run.JobID]; ok {
-					stage.Runs[i] = r
-				}
-			}
-		}
-
-		plan.mergeStages(stages)
-	}
-
-	summary.StageCount = len(plan.Stages)
-
-	return &SortResult{
-		Plan:    plan,
-		Err:     lastErr,
-		Summary: summary,
-	}
-}
-
-func SelectMatrixes(originalMatrixes []map[string]interface{}, targetMatrixValues map[string]map[string]bool) []map[string]interface{} {
-	matrixes := make([]map[string]interface{}, 0)
-	for _, original := range originalMatrixes {
-		flag := true
-		for key, val := range original {
-			if allowedVals, ok := targetMatrixValues[key]; ok {
-				valToString := fmt.Sprintf("%v", val)
-				if _, ok := allowedVals[valToString]; !ok {
-					flag = false
-				}
-			}
-		}
-		if flag {
-			matrixes = append(matrixes, original)
-		}
-	}
-	return matrixes
-}
-
-func getEventsFromWorkflows(workflows []*Workflow) []string {
-	events := make([]string, 0)
-	for _, w := range workflows {
-		found := false
-		for _, e := range events {
-			for _, we := range w.On() {
-				if e == we {
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
-		}
-
-		if !found {
-			events = append(events, w.On()...)
-		}
-	}
-
-	sort.Slice(events, func(i, j int) bool {
-		return events[i] < events[j]
-	})
-
-	return events
-}
-
-func (r *Run) String() string {
-	jobName := r.Job().Name
-	if jobName == "" {
-		jobName = r.JobID
-	}
-	return jobName
-}
-
-func (r *Run) Job() *Job {
-	return r.Workflow.GetJob(r.JobID)
-}
-
-func NewWorkflowPlanner(path string, noWorkflowRecurse, strict bool) (WorkflowPlanner, error) {
-	result, err := DiscoverWorkflows(DiscoveryInput{
-		WorkflowsPath:     path,
-		NoWorkflowRecurse: noWorkflowRecurse,
-		Strict:            strict,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	wp := &workflowPlanner{
-		workflows: result.Workflows,
-	}
 	return wp, nil
 }
 
@@ -683,14 +197,110 @@ type workflowPlanner struct {
 	workflows []*Workflow
 }
 
-func (wp *workflowPlanner) NewPipeline() *PlannerPipeline {
-	return NewPlannerPipeline(wp.workflows)
+// PlanEvent builds a new list of runs to execute in parallel for an event name
+func (wp *workflowPlanner) PlanEvent(eventName string) (*Plan, error) {
+	plan := new(Plan)
+	if len(wp.workflows) == 0 {
+		log.Debug("no workflows found by planner")
+		return plan, nil
+	}
+	var lastErr error
+
+	for _, w := range wp.workflows {
+		events := w.On()
+		if len(events) == 0 {
+			log.Debugf("no events found for workflow: %s", w.File)
+			continue
+		}
+
+		for _, e := range events {
+			if e == eventName {
+				stages, err := createStages(w, w.GetJobIDs()...)
+				if err != nil {
+					log.Warn(err)
+					lastErr = err
+				} else {
+					plan.mergeStages(stages)
+				}
+			}
+		}
+	}
+	return plan, lastErr
 }
 
+// PlanJob builds a new run to execute in parallel for a job name
+func (wp *workflowPlanner) PlanJob(jobName string) (*Plan, error) {
+	plan := new(Plan)
+	if len(wp.workflows) == 0 {
+		log.Debugf("no jobs found for workflow: %s", jobName)
+	}
+	var lastErr error
+
+	for _, w := range wp.workflows {
+		stages, err := createStages(w, jobName)
+		if err != nil {
+			log.Warn(err)
+			lastErr = err
+		} else {
+			plan.mergeStages(stages)
+		}
+	}
+	return plan, lastErr
+}
+
+// PlanAll builds a new run to execute in parallel all
+func (wp *workflowPlanner) PlanAll() (*Plan, error) {
+	plan := new(Plan)
+	if len(wp.workflows) == 0 {
+		log.Debug("no workflows found by planner")
+		return plan, nil
+	}
+	var lastErr error
+
+	for _, w := range wp.workflows {
+		stages, err := createStages(w, w.GetJobIDs()...)
+		if err != nil {
+			log.Warn(err)
+			lastErr = err
+		} else {
+			plan.mergeStages(stages)
+		}
+	}
+
+	return plan, lastErr
+}
+
+// GetEvents gets all the events in the workflows file
 func (wp *workflowPlanner) GetEvents() []string {
-	return getEventsFromWorkflows(wp.workflows)
+	events := make([]string, 0)
+	for _, w := range wp.workflows {
+		found := false
+		for _, e := range events {
+			for _, we := range w.On() {
+				if e == we {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+
+		if !found {
+			events = append(events, w.On()...)
+		}
+	}
+
+	// sort the list based on depth of dependencies
+	sort.Slice(events, func(i, j int) bool {
+		return events[i] < events[j]
+	})
+
+	return events
 }
 
+// MaxRunNameLen determines the max name length of all jobs
 func (p *Plan) MaxRunNameLen() int {
 	maxRunNameLen := 0
 	for _, stage := range p.Stages {
@@ -704,6 +314,7 @@ func (p *Plan) MaxRunNameLen() int {
 	return maxRunNameLen
 }
 
+// GetJobIDs will get all the job names in the stage
 func (s *Stage) GetJobIDs() []string {
 	names := make([]string, 0)
 	for _, r := range s.Runs {
@@ -712,6 +323,7 @@ func (s *Stage) GetJobIDs() []string {
 	return names
 }
 
+// Merge stages with existing stages in plan
 func (p *Plan) mergeStages(stages []*Stage) {
 	newStages := make([]*Stage, int(math.Max(float64(len(p.Stages)), float64(len(stages)))))
 	for i := 0; i < len(newStages); i++ {
@@ -729,10 +341,12 @@ func (p *Plan) mergeStages(stages []*Stage) {
 }
 
 func createStages(w *Workflow, jobIDs ...string) ([]*Stage, error) {
+	// first, build a list of all the necessary jobs to run, and their dependencies
 	jobDependencies := make(map[string][]string)
 	for len(jobIDs) > 0 {
 		newJobIDs := make([]string, 0)
 		for _, jID := range jobIDs {
+			// make sure we haven't visited this job yet
 			if _, ok := jobDependencies[jID]; !ok {
 				if job := w.GetJob(jID); job != nil {
 					jobDependencies[jID] = job.Needs()
@@ -743,10 +357,12 @@ func createStages(w *Workflow, jobIDs ...string) ([]*Stage, error) {
 		jobIDs = newJobIDs
 	}
 
+	// next, build an execution graph
 	stages := make([]*Stage, 0)
 	for len(jobDependencies) > 0 {
 		stage := new(Stage)
 		for jID, jDeps := range jobDependencies {
+			// make sure all deps are in the graph already
 			if listInStages(jDeps, stages...) {
 				stage.Runs = append(stage.Runs, &Run{
 					Workflow: w,
@@ -764,6 +380,7 @@ func createStages(w *Workflow, jobIDs ...string) ([]*Stage, error) {
 	return stages, nil
 }
 
+// return true iff all strings in srcList exist in at least one of the stages
 func listInStages(srcList []string, stages ...*Stage) bool {
 	for _, src := range srcList {
 		found := false

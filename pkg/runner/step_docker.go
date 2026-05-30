@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/kballard/go-shellquote"
@@ -72,16 +71,14 @@ func (sd *stepDocker) runUsesContainer() common.Executor {
 			entrypoint = []string{entry}
 		}
 
-		stepContainer := sd.newStepContainer(ctx, image, cmd, entrypoint)
+		builder := sd.createStepRuntimeSpecBuilder(ctx, image, cmd, entrypoint)
 
-		return common.NewPipelineExecutor(
-			stepContainer.Pull(rc.Config.ForcePull),
-			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
-			stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
-			stepContainer.Start(true),
-		).Finally(
-			stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
-		).Finally(stepContainer.Close())(ctx)
+		if rc.JobRuntimeScope != nil {
+			builder = builder.WithScopeID(rc.JobRuntimeScope.ID)
+		}
+		return builder.Execute(func(input *container.NewContainerInput) container.ExecutionsEnvironment {
+			return ContainerNewContainer(input)
+		})(ctx)
 	}
 }
 
@@ -89,7 +86,7 @@ var (
 	ContainerNewContainer = container.NewContainer
 )
 
-func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd []string, entrypoint []string) container.Container {
+func (sd *stepDocker) createStepRuntimeSpecBuilder(ctx context.Context, image string, cmd []string, entrypoint []string) *container.RuntimeSpecBuilder {
 	rc := sd.RunContext
 	step := sd.Step
 
@@ -102,34 +99,30 @@ func (sd *stepDocker) newStepContainer(ctx context.Context, image string, cmd []
 		}
 		return true
 	})
-	envList := make([]string, 0)
-	for k, v := range sd.env {
-		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
 
 	binds, mounts := rc.GetBindsAndMounts()
-	stepContainer := ContainerNewContainer(&container.NewContainerInput{
-		Cmd:         cmd,
-		Entrypoint:  entrypoint,
-		WorkingDir:  rc.JobContainer.ToContainerPath(rc.Config.Workdir),
-		Image:       image,
-		Username:    rc.Config.Secrets["DOCKER_USERNAME"],
-		Password:    rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:        createContainerName(rc.jobContainerName(), step.ID),
-		Env:         envList,
-		Mounts:      mounts,
-		NetworkMode: fmt.Sprintf("container:%s", rc.jobContainerName()),
-		Binds:       binds,
-		Stdout:      logWriter,
-		Stderr:      logWriter,
-		Privileged:  rc.Config.Privileged,
-		UsernsMode:  rc.Config.UsernsMode,
-		Platform:    rc.Config.ContainerArchitecture,
-	})
-	return stepContainer
+	builder := container.NewRuntimeSpecBuilder(container.NewStepRuntimeSpec()).
+		WithName(createContainerName(rc.jobContainerName(), step.ID)).
+		WithImage(image).
+		WithCmd(cmd).
+		WithEntrypoint(entrypoint).
+		WithWorkingDir(rc.JobContainer.ToContainerPath(rc.Config.Workdir)).
+		WithCredentials(rc.Config.Secrets["DOCKER_USERNAME"], rc.Config.Secrets["DOCKER_PASSWORD"]).
+		WithEnvMap(sd.env).
+		WithDefaultRunnerEnv(ctx).
+		WithBinds(binds).
+		WithMounts(mounts).
+		WithNetworkMode(container.NetworkModeContainer(rc.jobContainerName())).
+		WithStdout(logWriter).
+		WithStderr(logWriter).
+		WithPrivileged(rc.Config.Privileged).
+		WithUsernsMode(rc.Config.UsernsMode).
+		WithPlatform(rc.Config.ContainerArchitecture).
+		WithForcePull(rc.Config.ForcePull).
+		WithReuseContainer(rc.Config.ReuseContainers).
+		WithCapabilities(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).
+		WithAttach(true).
+		WithWait(true)
+
+	return builder
 }

@@ -301,9 +301,7 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 		planner, err := model.NewWorkflowPlanner(fullWorkflowPath, true, false)
 		assert.Nil(t, err, fullWorkflowPath)
 
-		result := planner.NewPipeline().Execute(model.SelectByEvent(tjfi.eventName))
-		plan := result.Plan
-		err = result.Error
+		plan, err := planner.PlanEvent(tjfi.eventName)
 		if err == nil {
 			err = runner.NewPlanExecutor(plan)(ctx)
 			if tjfi.errorMessage == "" {

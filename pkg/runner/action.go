@@ -250,15 +250,13 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 	rc := step.getRunContext()
 	action := step.getActionModel()
 
-	var prepImage common.Executor
 	var image string
-	forcePull := false
-	if strings.HasPrefix(action.Runs.Image, "docker://") {
+	var buildSpec *container.ImageBuildSpec
+	isDockerImage := strings.HasPrefix(action.Runs.Image, "docker://")
+
+	if isDockerImage {
 		image = strings.TrimPrefix(action.Runs.Image, "docker://")
-		// Apply forcePull only for prebuild docker images
-		forcePull = rc.Config.ForcePull
 	} else {
-		// "-dockeraction" enshures that "./", "./test " won't get converted to "act-:latest", "act-test-:latest" which are invalid docker image names
 		image = fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(actionName, "-"), "latest")
 		image = fmt.Sprintf("act-%s", strings.TrimLeft(image, "-"))
 		image = strings.ToLower(image)
@@ -301,17 +299,16 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 				}
 				defer buildContext.Close()
 			}
-			prepImage = container.NewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
+			buildSpec = &container.ImageBuildSpec{
 				ContextDir:   filepath.Join(basedir, contextDir),
 				Dockerfile:   fileName,
-				ImageTag:     image,
 				BuildContext: buildContext,
-				Platform:     rc.Config.ContainerArchitecture,
-			})
+			}
 		} else {
 			logger.Debugf("image '%s' for architecture '%s' already exists", image, rc.Config.ContainerArchitecture)
 		}
 	}
+
 	eval := rc.NewStepExpressionEvaluator(ctx, step)
 	cmd, err := shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
 	if err != nil {
@@ -343,16 +340,27 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 			entrypoint = nil
 		}
 	}
-	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint)
-	return common.NewPipelineExecutor(
-		prepImage,
-		stepContainer.Pull(forcePull),
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
-		stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
-		stepContainer.Start(true),
-	).Finally(
-		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
-	).Finally(stepContainer.Close())(ctx)
+
+	builder := createActionRuntimeSpecBuilder(ctx, step, image, cmd, entrypoint)
+
+	if buildSpec != nil {
+		builder = builder.
+			WithBuildSpec(buildSpec).
+			WithForceRebuild(rc.Config.ForceRebuild).
+			WithPullPolicy(container.ImagePullPolicyNever)
+	} else {
+		builder = builder.
+			WithForcePull(rc.Config.ForcePull)
+	}
+
+	if isDockerImage {
+		builder = builder.WithCredentials(rc.Config.Secrets["DOCKER_USERNAME"], rc.Config.Secrets["DOCKER_PASSWORD"])
+	}
+
+	if rc.JobRuntimeScope != nil {
+		builder = builder.WithScopeID(rc.JobRuntimeScope.ID)
+	}
+	return builder.Execute()(ctx)
 }
 
 func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[]string) {
@@ -384,7 +392,7 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	}
 }
 
-func newStepContainer(ctx context.Context, step step, image string, cmd []string, entrypoint []string) container.Container {
+func createActionRuntimeSpecBuilder(ctx context.Context, step step, image string, cmd []string, entrypoint []string) *container.RuntimeSpecBuilder {
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
 	rawLogger := common.Logger(ctx).WithField("raw_output", true)
@@ -396,46 +404,41 @@ func newStepContainer(ctx context.Context, step step, image string, cmd []string
 		}
 		return true
 	})
-	envList := make([]string, 0)
-	for k, v := range *step.getEnv() {
-		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
-	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
 
 	binds, mounts := rc.GetBindsAndMounts()
-	networkMode := fmt.Sprintf("container:%s", rc.jobContainerName())
+	networkMode := container.NetworkModeContainer(rc.jobContainerName())
 	var workdir string
 	if rc.IsHostEnv(ctx) {
-		networkMode = "default"
+		networkMode = string(container.NetworkModeDefault)
 		ext := container.LinuxContainerEnvironmentExtensions{}
 		workdir = ext.ToContainerPath(rc.Config.Workdir)
 	} else {
 		workdir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
 	}
-	stepContainer := container.NewContainer(&container.NewContainerInput{
-		Cmd:         cmd,
-		Entrypoint:  entrypoint,
-		WorkingDir:  workdir,
-		Image:       image,
-		Username:    rc.Config.Secrets["DOCKER_USERNAME"],
-		Password:    rc.Config.Secrets["DOCKER_PASSWORD"],
-		Name:        createContainerName(rc.jobContainerName(), stepModel.ID),
-		Env:         envList,
-		Mounts:      mounts,
-		NetworkMode: networkMode,
-		Binds:       binds,
-		Stdout:      logWriter,
-		Stderr:      logWriter,
-		Privileged:  rc.Config.Privileged,
-		UsernsMode:  rc.Config.UsernsMode,
-		Platform:    rc.Config.ContainerArchitecture,
-		Options:     rc.Config.ContainerOptions,
-	})
-	return stepContainer
+
+	builder := container.NewRuntimeSpecBuilder(container.NewActionRuntimeSpec()).
+		WithName(createContainerName(rc.jobContainerName(), stepModel.ID)).
+		WithImage(image).
+		WithCmd(cmd).
+		WithEntrypoint(entrypoint).
+		WithWorkingDir(workdir).
+		WithEnvMap(*step.getEnv()).
+		WithDefaultRunnerEnv(ctx).
+		WithBinds(binds).
+		WithMounts(mounts).
+		WithNetworkMode(networkMode).
+		WithStdout(logWriter).
+		WithStderr(logWriter).
+		WithPrivileged(rc.Config.Privileged).
+		WithUsernsMode(rc.Config.UsernsMode).
+		WithPlatform(rc.Config.ContainerArchitecture).
+		WithOptions(rc.Config.ContainerOptions).
+		WithReuseContainer(rc.Config.ReuseContainers).
+		WithCapabilities(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).
+		WithAttach(true).
+		WithWait(true)
+
+	return builder
 }
 
 func populateEnvsFromSavedState(env *map[string]string, step actionStep, rc *RunContext) {

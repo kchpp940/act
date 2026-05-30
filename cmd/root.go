@@ -458,41 +458,59 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return err
 		}
 
+		// check if we should just list the workflows
 		list, err := cmd.Flags().GetBool("list")
 		if err != nil {
 			return err
 		}
 
+		// check if we should just validate the workflows
+		if input.validate {
+			return err
+		}
+
+		// check if we should just draw the graph
 		graph, err := cmd.Flags().GetBool("graph")
 		if err != nil {
 			return err
 		}
 
-		var policy *model.SelectionPolicy
+		// collect all events from loaded workflows
+		events := planner.GetEvents()
+
+		// plan with filtered jobs - to be used for filtering only
+		var filterPlan *model.Plan
+
+		// Determine the event name to be filtered
+		var filterEventName string
+
 		if len(args) > 0 {
-			policy = model.SelectByEvent(args[0])
-		} else if jobID != "" {
-			policy = model.SelectByJob(jobID)
+			log.Debugf("Using first passed in arguments event for filtering: %s", args[0])
+			filterEventName = args[0]
+		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+			// set default event type to first event from many available
+			// this way user dont have to specify the event.
+			log.Debugf("Using first detected workflow event for filtering: %s", events[0])
+			filterEventName = events[0]
+		}
+
+		var plannerErr error
+		if jobID != "" {
+			log.Debugf("Preparing plan with a job: %s", jobID)
+			filterPlan, plannerErr = planner.PlanJob(jobID)
+		} else if filterEventName != "" {
+			log.Debugf("Preparing plan for a event: %s", filterEventName)
+			filterPlan, plannerErr = planner.PlanEvent(filterEventName)
 		} else {
-			policy = model.SelectWithAutoDetect().WithAutoDetect(input.autodetectEvent)
+			log.Debugf("Preparing plan with all jobs")
+			filterPlan, plannerErr = planner.PlanAll()
 		}
-		policy.WithMatrix(matrixes)
-
-		result := planner.NewPipeline().Execute(policy)
-		plan := result.Plan
-		eventName := result.EventName
-		plannerErr := result.Error
-
-		if plan == nil && plannerErr != nil {
-			return plannerErr
-		}
-
-		if input.validate {
+		if filterPlan == nil && plannerErr != nil {
 			return plannerErr
 		}
 
 		if list {
-			err = printList(plan)
+			err = printList(filterPlan)
 			if err != nil {
 				return err
 			}
@@ -500,17 +518,50 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		if graph {
-			err = drawGraph(plan)
+			err = drawGraph(filterPlan)
 			if err != nil {
 				return err
 			}
 			return plannerErr
 		}
 
+		// plan with triggered jobs
+		var plan *model.Plan
+
+		// Determine the event name to be triggered
+		var eventName string
+
+		if len(args) > 0 {
+			log.Debugf("Using first passed in arguments event: %s", args[0])
+			eventName = args[0]
+		} else if len(events) == 1 && len(events[0]) > 0 {
+			log.Debugf("Using the only detected workflow event: %s", events[0])
+			eventName = events[0]
+		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+			// set default event type to first event from many available
+			// this way user dont have to specify the event.
+			log.Debugf("Using first detected workflow event: %s", events[0])
+			eventName = events[0]
+		} else {
+			log.Debugf("Using default workflow event: push")
+			eventName = "push"
+		}
+
+		// build the plan for this run
+		if jobID != "" {
+			log.Debugf("Planning job: %s", jobID)
+			plan, plannerErr = planner.PlanJob(jobID)
+		} else {
+			log.Debugf("Planning jobs for event: %s", eventName)
+			plan, plannerErr = planner.PlanEvent(eventName)
+		}
 		if plan != nil {
 			if len(plan.Stages) == 0 {
 				plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
 			}
+		}
+		if plan == nil && plannerErr != nil {
+			return plannerErr
 		}
 
 		// check to see if the main branch was defined
