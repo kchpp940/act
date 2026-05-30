@@ -1063,18 +1063,12 @@ func (rc *RunContext) getGithubContext(ctx context.Context) *model.GithubContext
 
 func isLocalCheckout(ghc *model.GithubContext, step *model.Step) bool {
 	if step.Type() == model.StepTypeInvalid {
-		// This will be errored out by the executor later, we need this here to avoid a null panic though
 		return false
 	}
 	if step.Type() != model.StepTypeUsesActionRemote {
 		return false
 	}
-	remoteAction := newRemoteAction(step.Uses)
-	if remoteAction == nil {
-		// IsCheckout() will nil panic if we dont bail out early
-		return false
-	}
-	if !remoteAction.IsCheckout() {
+	if !strings.HasPrefix(step.Uses, "actions/checkout@") {
 		return false
 	}
 

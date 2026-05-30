@@ -25,6 +25,7 @@ type actionStep interface {
 	step
 
 	getActionModel() *model.Action
+	getActionSource() *ActionSource
 	getCompositeRunContext(context.Context) *RunContext
 	getCompositeSteps() *compositeSteps
 }
@@ -35,7 +36,7 @@ type actionYamlReader func(filename string) (io.Reader, io.Closer, error)
 
 type fileWriter func(filename string, data []byte, perm fs.FileMode) error
 
-type runAction func(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor
+type runAction func(step actionStep) common.Executor
 
 //go:embed res/trampoline.js
 var trampoline embed.FS
@@ -116,14 +117,32 @@ func readActionImpl(ctx context.Context, step *model.Step, actionDir string, act
 	return action, err
 }
 
-func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string, actionPath string, containerActionDir string) error {
+func newActionSourceResolverForStep(ctx context.Context, step actionStep) ActionSourceResolver {
+	rc := step.getRunContext()
+	ghc := rc.getGithubContext(ctx)
+	return NewActionSourceResolver(ActionSourceResolverConfig{
+		ServerURL:                          ghc.ServerURL,
+		Token:                              rc.Config.Token,
+		Workdir:                            rc.Config.Workdir,
+		ActionCacheDir:                     rc.ActionCacheDir(),
+		ReplaceGheActionWithGithubCom:      rc.Config.ReplaceGheActionWithGithubCom,
+		ReplaceGheActionTokenWithGithubCom: rc.Config.ReplaceGheActionTokenWithGithubCom,
+		ActionCache:                        rc.Config.ActionCache,
+		OfflineMode:                        rc.Config.ActionOfflineMode,
+	})
+}
+
+func maybeCopyToActionDir(ctx context.Context, step actionStep, containerActionDir string) error {
 	logger := common.Logger(ctx)
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
+	source := step.getActionSource()
 
 	if stepModel.Type() != model.StepTypeUsesActionRemote {
 		return nil
 	}
+
+	actionPath := source.ActionPath()
 
 	var containerActionDirCopy string
 	containerActionDirCopy = strings.TrimSuffix(containerActionDir, actionPath)
@@ -134,8 +153,8 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 	}
 
 	if rc.Config != nil && rc.Config.ActionCache != nil {
-		raction := step.(*stepActionRemote)
-		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.cacheDir, raction.resolvedSha, "")
+		resolver := newActionSourceResolverForStep(ctx, step)
+		ta, err := resolver.GetTarArchive(ctx, source, "")
 		if err != nil {
 			return err
 		}
@@ -143,41 +162,36 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 		return rc.JobContainer.CopyTarStream(ctx, containerActionDirCopy, ta)
 	}
 
-	if err := removeGitIgnore(ctx, actionDir); err != nil {
+	if err := removeGitIgnore(ctx, source.ActionDir()); err != nil {
 		return err
 	}
 
-	return rc.JobContainer.CopyDir(containerActionDirCopy, actionDir+"/", rc.Config.UseGitIgnore)(ctx)
+	return rc.JobContainer.CopyDir(containerActionDirCopy, source.ActionDir()+"/", rc.Config.UseGitIgnore)(ctx)
 }
 
-func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor {
+func runActionImpl(step actionStep) common.Executor {
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
+	source := step.getActionSource()
 
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
-		actionPath := ""
-		if remoteAction != nil && remoteAction.Path != "" {
-			actionPath = remoteAction.Path
-		}
-
 		action := step.getActionModel()
 		logger.Debugf("About to run action %v", action)
 
-		err := setupActionEnv(ctx, step, remoteAction)
+		err := setupActionEnv(ctx, step)
 		if err != nil {
 			return err
 		}
 
-		actionLocation := path.Join(actionDir, actionPath)
-		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
+		actionName, containerActionDir := source.ContainerActionPaths(rc)
 
-		logger.Debugf("type=%v actionDir=%s actionPath=%s workdir=%s actionCacheDir=%s actionName=%s containerActionDir=%s", stepModel.Type(), actionDir, actionPath, rc.Config.Workdir, rc.ActionCacheDir(), actionName, containerActionDir)
+		logger.Debugf("type=%v actionDir=%s actionPath=%s workdir=%s actionCacheDir=%s actionName=%s containerActionDir=%s", stepModel.Type(), source.ActionDir(), source.ActionPath(), rc.Config.Workdir, rc.ActionCacheDir(), actionName, containerActionDir)
 
 		x := action.Runs.Using
 		switch {
 		case x.IsNode():
-			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
+			if err := maybeCopyToActionDir(ctx, step, containerActionDir); err != nil {
 				return err
 			}
 			containerArgs := []string{rc.GetNodeToolFullPath(ctx), path.Join(containerActionDir, action.Runs.Main)}
@@ -187,13 +201,9 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
 		case x.IsDocker():
-			if remoteAction == nil {
-				actionDir = ""
-				actionPath = containerActionDir
-			}
-			return execAsDocker(ctx, step, actionName, actionDir, actionPath, remoteAction == nil, "entrypoint")
+			return execAsDocker(ctx, step, actionName, containerActionDir, "entrypoint")
 		case x.IsComposite():
-			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
+			if err := maybeCopyToActionDir(ctx, step, containerActionDir); err != nil {
 				return err
 			}
 
@@ -211,13 +221,9 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 	}
 }
 
-func setupActionEnv(ctx context.Context, step actionStep, _ *remoteAction) error {
+func setupActionEnv(ctx context.Context, step actionStep) error {
 	rc := step.getRunContext()
 
-	// A few fields in the environment (e.g. GITHUB_ACTION_REPOSITORY)
-	// are dependent on the action. That means we can complete the
-	// setup only after resolving the whole action model and cloning
-	// the action
 	rc.withGithubEnv(ctx, step.getGithubContext(ctx), *step.getEnv())
 	populateEnvsFromSavedState(step.getEnv(), step, rc)
 	populateEnvsFromInput(ctx, step.getEnv(), step.getActionModel(), rc)
@@ -245,22 +251,22 @@ func removeGitIgnore(ctx context.Context, directory string) error {
 // TODO: break out parts of function to reduce complexicity
 //
 //nolint:gocyclo
-func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, subpath string, localAction bool, entrypointType string) error {
+func execAsDocker(ctx context.Context, step actionStep, actionName, containerActionDir string, entrypointType string) error {
 	logger := common.Logger(ctx)
 	rc := step.getRunContext()
 	action := step.getActionModel()
+	source := step.getActionSource()
 
+	var prepImage common.Executor
 	var image string
-	var buildSpec *container.ImageBuildSpec
-	isDockerImage := strings.HasPrefix(action.Runs.Image, "docker://")
-
-	if isDockerImage {
+	forcePull := false
+	if strings.HasPrefix(action.Runs.Image, "docker://") {
 		image = strings.TrimPrefix(action.Runs.Image, "docker://")
+		forcePull = rc.Config.ForcePull
 	} else {
-		image = fmt.Sprintf("%s-dockeraction:%s", regexp.MustCompile("[^a-zA-Z0-9]").ReplaceAllString(actionName, "-"), "latest")
-		image = fmt.Sprintf("act-%s", strings.TrimLeft(image, "-"))
-		image = strings.ToLower(image)
-		contextDir, fileName := path.Split(path.Join(subpath, action.Runs.Image))
+		image = source.DockerImageName(actionName)
+		contextDir := source.DockerBuildContextDir(action)
+		fileName := source.DockerfilePath(action)
 
 		anyArchExists, err := container.ImageExistsLocally(ctx, image, "any")
 		if err != nil {
@@ -285,30 +291,35 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 		if !correctArchExists || rc.Config.ForceRebuild {
 			logger.Debugf("image '%s' for architecture '%s' will be built from context '%s", image, rc.Config.ContainerArchitecture, contextDir)
 			var buildContext io.ReadCloser
-			if localAction {
+			if source.IsLocalAction() {
 				buildContext, err = rc.JobContainer.GetContainerArchive(ctx, contextDir+"/.")
 				if err != nil {
 					return err
 				}
 				defer buildContext.Close()
 			} else if rc.Config.ActionCache != nil {
-				rstep := step.(*stepActionRemote)
-				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, contextDir)
+				resolver := newActionSourceResolverForStep(ctx, step)
+				buildContext, err = resolver.GetTarArchive(ctx, source, contextDir)
 				if err != nil {
 					return err
 				}
 				defer buildContext.Close()
 			}
-			buildSpec = &container.ImageBuildSpec{
+			basedir := source.ActionDir()
+			if source.IsLocalAction() {
+				basedir = source.Workdir
+			}
+			prepImage = container.NewDockerBuildExecutor(container.NewDockerBuildExecutorInput{
 				ContextDir:   filepath.Join(basedir, contextDir),
 				Dockerfile:   fileName,
+				ImageTag:     image,
 				BuildContext: buildContext,
-			}
+				Platform:     rc.Config.ContainerArchitecture,
+			})
 		} else {
 			logger.Debugf("image '%s' for architecture '%s' already exists", image, rc.Config.ContainerArchitecture)
 		}
 	}
-
 	eval := rc.NewStepExpressionEvaluator(ctx, step)
 	cmd, err := shellquote.Split(eval.Interpolate(ctx, step.getStepModel().With["args"]))
 	if err != nil {
@@ -340,27 +351,16 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 			entrypoint = nil
 		}
 	}
-
-	builder := createActionRuntimeSpecBuilder(ctx, step, image, cmd, entrypoint)
-
-	if buildSpec != nil {
-		builder = builder.
-			WithBuildSpec(buildSpec).
-			WithForceRebuild(rc.Config.ForceRebuild).
-			WithPullPolicy(container.ImagePullPolicyNever)
-	} else {
-		builder = builder.
-			WithForcePull(rc.Config.ForcePull)
-	}
-
-	if isDockerImage {
-		builder = builder.WithCredentials(rc.Config.Secrets["DOCKER_USERNAME"], rc.Config.Secrets["DOCKER_PASSWORD"])
-	}
-
-	if rc.JobRuntimeScope != nil {
-		builder = builder.WithScopeID(rc.JobRuntimeScope.ID)
-	}
-	return builder.Execute()(ctx)
+	stepContainer := newStepContainer(ctx, step, image, cmd, entrypoint)
+	return common.NewPipelineExecutor(
+		prepImage,
+		stepContainer.Pull(forcePull),
+		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+		stepContainer.Create(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop),
+		stepContainer.Start(true),
+	).Finally(
+		stepContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+	).Finally(stepContainer.Close())(ctx)
 }
 
 func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[]string) {
@@ -392,7 +392,7 @@ func evalDockerArgs(ctx context.Context, step step, action *model.Action, cmd *[
 	}
 }
 
-func createActionRuntimeSpecBuilder(ctx context.Context, step step, image string, cmd []string, entrypoint []string) *container.RuntimeSpecBuilder {
+func newStepContainer(ctx context.Context, step step, image string, cmd []string, entrypoint []string) container.Container {
 	rc := step.getRunContext()
 	stepModel := step.getStepModel()
 	rawLogger := common.Logger(ctx).WithField("raw_output", true)
@@ -404,41 +404,46 @@ func createActionRuntimeSpecBuilder(ctx context.Context, step step, image string
 		}
 		return true
 	})
+	envList := make([]string, 0)
+	for k, v := range *step.getEnv() {
+		envList = append(envList, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_ARCH", container.RunnerArch(ctx)))
+	envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
 
 	binds, mounts := rc.GetBindsAndMounts()
-	networkMode := container.NetworkModeContainer(rc.jobContainerName())
+	networkMode := fmt.Sprintf("container:%s", rc.jobContainerName())
 	var workdir string
 	if rc.IsHostEnv(ctx) {
-		networkMode = string(container.NetworkModeDefault)
+		networkMode = "default"
 		ext := container.LinuxContainerEnvironmentExtensions{}
 		workdir = ext.ToContainerPath(rc.Config.Workdir)
 	} else {
 		workdir = rc.JobContainer.ToContainerPath(rc.Config.Workdir)
 	}
-
-	builder := container.NewRuntimeSpecBuilder(container.NewActionRuntimeSpec()).
-		WithName(createContainerName(rc.jobContainerName(), stepModel.ID)).
-		WithImage(image).
-		WithCmd(cmd).
-		WithEntrypoint(entrypoint).
-		WithWorkingDir(workdir).
-		WithEnvMap(*step.getEnv()).
-		WithDefaultRunnerEnv(ctx).
-		WithBinds(binds).
-		WithMounts(mounts).
-		WithNetworkMode(networkMode).
-		WithStdout(logWriter).
-		WithStderr(logWriter).
-		WithPrivileged(rc.Config.Privileged).
-		WithUsernsMode(rc.Config.UsernsMode).
-		WithPlatform(rc.Config.ContainerArchitecture).
-		WithOptions(rc.Config.ContainerOptions).
-		WithReuseContainer(rc.Config.ReuseContainers).
-		WithCapabilities(rc.Config.ContainerCapAdd, rc.Config.ContainerCapDrop).
-		WithAttach(true).
-		WithWait(true)
-
-	return builder
+	stepContainer := container.NewContainer(&container.NewContainerInput{
+		Cmd:         cmd,
+		Entrypoint:  entrypoint,
+		WorkingDir:  workdir,
+		Image:       image,
+		Username:    rc.Config.Secrets["DOCKER_USERNAME"],
+		Password:    rc.Config.Secrets["DOCKER_PASSWORD"],
+		Name:        createContainerName(rc.jobContainerName(), stepModel.ID),
+		Env:         envList,
+		Mounts:      mounts,
+		NetworkMode: networkMode,
+		Binds:       binds,
+		Stdout:      logWriter,
+		Stderr:      logWriter,
+		Privileged:  rc.Config.Privileged,
+		UsernsMode:  rc.Config.UsernsMode,
+		Platform:    rc.Config.ContainerArchitecture,
+		Options:     rc.Config.ContainerOptions,
+	})
+	return stepContainer
 }
 
 func populateEnvsFromSavedState(env *map[string]string, step actionStep, rc *RunContext) {
@@ -523,38 +528,17 @@ func runPreStep(step actionStep) common.Executor {
 		logger.Debugf("run pre step for '%s'", step.getStepModel())
 
 		rc := step.getRunContext()
-		stepModel := step.getStepModel()
 		action := step.getActionModel()
+		source := step.getActionSource()
 
-		// defaults in pre steps were missing, however provided inputs are available
 		populateEnvsFromInput(ctx, step.getEnv(), action, rc)
 
-		// todo: refactor into step
-		var actionDir string
-		var actionPath string
-		var remoteAction *stepActionRemote
-		if remote, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
-			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
-			remoteAction = remote
-		} else {
-			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
-			actionPath = ""
-		}
-
-		actionLocation := ""
-		if actionPath != "" {
-			actionLocation = path.Join(actionDir, actionPath)
-		} else {
-			actionLocation = actionDir
-		}
-
-		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
+		actionName, containerActionDir := source.ContainerActionPaths(rc)
 
 		x := action.Runs.Using
 		switch {
 		case x.IsNode():
-			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
+			if err := maybeCopyToActionDir(ctx, step, containerActionDir); err != nil {
 				return err
 			}
 
@@ -566,11 +550,7 @@ func runPreStep(step actionStep) common.Executor {
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
 
 		case x.IsDocker():
-			if remoteAction == nil {
-				actionDir = ""
-				actionPath = containerActionDir
-			}
-			return execAsDocker(ctx, step, actionName, actionDir, actionPath, remoteAction == nil, "pre-entrypoint")
+			return execAsDocker(ctx, step, actionName, containerActionDir, "pre-entrypoint")
 
 		case x.IsComposite():
 			if step.getCompositeSteps() == nil {
@@ -630,30 +610,10 @@ func runPostStep(step actionStep) common.Executor {
 		logger.Debugf("run post step for '%s'", step.getStepModel())
 
 		rc := step.getRunContext()
-		stepModel := step.getStepModel()
 		action := step.getActionModel()
+		source := step.getActionSource()
 
-		// todo: refactor into step
-		var actionDir string
-		var actionPath string
-		var remoteAction *stepActionRemote
-		if remote, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
-			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
-			remoteAction = remote
-		} else {
-			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
-			actionPath = ""
-		}
-
-		actionLocation := ""
-		if actionPath != "" {
-			actionLocation = path.Join(actionDir, actionPath)
-		} else {
-			actionLocation = actionDir
-		}
-
-		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
+		actionName, containerActionDir := source.ContainerActionPaths(rc)
 
 		x := action.Runs.Using
 		switch {
@@ -669,14 +629,10 @@ func runPostStep(step actionStep) common.Executor {
 			return rc.execJobContainer(containerArgs, *step.getEnv(), "", "")(ctx)
 
 		case x.IsDocker():
-			if remoteAction == nil {
-				actionDir = ""
-				actionPath = containerActionDir
-			}
-			return execAsDocker(ctx, step, actionName, actionDir, actionPath, remoteAction == nil, "post-entrypoint")
+			return execAsDocker(ctx, step, actionName, containerActionDir, "post-entrypoint")
 
 		case x.IsComposite():
-			if err := maybeCopyToActionDir(ctx, step, actionDir, actionPath, containerActionDir); err != nil {
+			if err := maybeCopyToActionDir(ctx, step, containerActionDir); err != nil {
 				return err
 			}
 

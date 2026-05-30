@@ -166,6 +166,19 @@ func TestActionRunner(t *testing.T) {
 					},
 					nodeToolFullPath: "node",
 				},
+				actionSource: &ActionSource{
+					Type:         ActionSourceTypeRemoteAction,
+					Uses:         "org/repo/path@ref",
+					Org:          "org",
+					Repo:         "repo",
+					Path:         "path",
+					Ref:          "ref",
+					URL:          "https://github.com",
+					CloneURL:     "https://github.com/org/repo",
+					CacheDir:     "org/repo",
+					ExecutionDir: "dir",
+					Workdir:      "",
+				},
 				action: &model.Action{
 					Inputs: map[string]model.Input{
 						"key": {
@@ -211,6 +224,19 @@ func TestActionRunner(t *testing.T) {
 					},
 					nodeToolFullPath: "node",
 				},
+				actionSource: &ActionSource{
+					Type:         ActionSourceTypeRemoteAction,
+					Uses:         "org/repo/path@ref",
+					Org:          "org",
+					Repo:         "repo",
+					Path:         "path",
+					Ref:          "ref",
+					URL:          "https://github.com",
+					CloneURL:     "https://github.com/org/repo",
+					CacheDir:     "org/repo",
+					ExecutionDir: "dir",
+					Workdir:      "",
+				},
 				action: &model.Action{
 					Runs: model.ActionRuns{
 						Using: "node16",
@@ -242,7 +268,7 @@ func TestActionRunner(t *testing.T) {
 
 			tt.step.getRunContext().JobContainer = cm
 
-			err := runActionImpl(tt.step, "dir", newRemoteAction("org/repo/path@ref"))(ctx)
+			err := runActionImpl(tt.step)(ctx)
 
 			assert.Nil(t, err)
 			cm.AssertExpectations(t)

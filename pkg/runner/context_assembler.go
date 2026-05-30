@@ -629,9 +629,9 @@ func (f *ContextSnapshotFactory) CreateStepSnapshot(ctx context.Context, step st
 	stepSnapshot.Env = *step.getEnv()
 
 	ghc := *stepSnapshot.Github
-	if sar, ok := step.(*stepActionRemote); ok && sar.remoteAction != nil {
-		ghc.ActionRepository = fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo)
-		ghc.ActionRef = sar.remoteAction.Ref
+	if sar, ok := step.(*stepActionRemote); ok && sar.actionSource != nil {
+		ghc.ActionRepository = fmt.Sprintf("%s/%s", sar.actionSource.Org, sar.actionSource.Repo)
+		ghc.ActionRef = sar.actionSource.Ref
 	}
 	stepSnapshot.Github = &ghc
 

@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-//nolint:gosec
 func TestActionCache(t *testing.T) {
 	a := assert.New(t)
 	cache := &GoGitActionCache{
@@ -53,11 +52,17 @@ func TestActionCache(t *testing.T) {
 	}
 	for _, c := range refs {
 		t.Run(c.Name, func(_ *testing.T) {
-			sha, err := cache.Fetch(ctx, c.CacheDir, c.Repo, c.Ref, "")
+			source := &ActionSource{
+				Uses:     c.CacheDir + "@" + c.Ref,
+				CacheDir: c.CacheDir,
+				CloneURL: c.Repo,
+				Ref:      c.Ref,
+			}
+			sha, err := cache.Fetch(ctx, source)
 			if !a.NoError(err) || !a.NotEmpty(sha) {
 				return
 			}
-			atar, err := cache.GetTarArchive(ctx, c.CacheDir, sha, "js")
+			atar, err := cache.GetTarArchive(ctx, source, sha, "js")
 			if !a.NoError(err) || !a.NotEmpty(atar) {
 				return
 			}
@@ -136,7 +141,13 @@ func TestActionCacheFailures(t *testing.T) {
 	}
 	for _, c := range refs {
 		t.Run(c.Name, func(t *testing.T) {
-			_, err := cache.Fetch(ctx, c.CacheDir, c.Repo, c.Ref, "")
+			source := &ActionSource{
+				Uses:     c.CacheDir + "@" + c.Ref,
+				CacheDir: c.CacheDir,
+				CloneURL: c.Repo,
+				Ref:      c.Ref,
+			}
+			_, err := cache.Fetch(ctx, source)
 			t.Logf("%s\n", err)
 			if !a.Error(err) {
 				return

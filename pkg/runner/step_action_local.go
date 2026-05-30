@@ -24,6 +24,7 @@ type stepActionLocal struct {
 	readAction          readAction
 	env                 map[string]string
 	action              *model.Action
+	actionSource        *ActionSource
 }
 
 func (sal *stepActionLocal) pre() common.Executor {
@@ -40,10 +41,18 @@ func (sal *stepActionLocal) main() common.Executor {
 			return nil
 		}
 
-		actionDir := filepath.Join(sal.getRunContext().Config.Workdir, sal.Step.Uses)
+		sal.actionSource = &ActionSource{
+			Type:           ActionSourceTypeLocal,
+			Uses:           sal.Step.Uses,
+			ExecutionDir:   filepath.Join(sal.RunContext.Config.Workdir, sal.Step.Uses),
+			Workdir:        sal.RunContext.Config.Workdir,
+			ActionCacheDir: sal.RunContext.ActionCacheDir(),
+		}
+
+		actionDir := sal.actionSource.ActionDir()
 
 		localReader := func(ctx context.Context) actionYamlReader {
-			_, cpath := getContainerActionPaths(sal.Step, path.Join(actionDir, ""), sal.RunContext)
+			_, cpath := sal.actionSource.ContainerActionPaths(sal.RunContext)
 			return func(filename string) (io.Reader, io.Closer, error) {
 				spath := path.Join(cpath, filename)
 				for i := 0; i < maxSymlinkDepth; i++ {
@@ -80,7 +89,7 @@ func (sal *stepActionLocal) main() common.Executor {
 
 		sal.action = actionModel
 
-		return sal.runAction(sal, actionDir, nil)(ctx)
+		return sal.runAction(sal)(ctx)
 	})
 }
 
@@ -118,10 +127,31 @@ func (sal *stepActionLocal) getActionModel() *model.Action {
 	return sal.action
 }
 
+func (sal *stepActionLocal) getActionSource() *ActionSource {
+	if sal.actionSource == nil {
+		sal.actionSource = &ActionSource{
+			Type:           ActionSourceTypeLocal,
+			Uses:           sal.Step.Uses,
+			ExecutionDir:   filepath.Join(sal.RunContext.Config.Workdir, sal.Step.Uses),
+			Workdir:        sal.RunContext.Config.Workdir,
+			ActionCacheDir: sal.RunContext.ActionCacheDir(),
+		}
+	}
+	return sal.actionSource
+}
+
 func (sal *stepActionLocal) getCompositeRunContext(ctx context.Context) *RunContext {
 	if sal.compositeRunContext == nil {
-		actionDir := filepath.Join(sal.RunContext.Config.Workdir, sal.Step.Uses)
-		_, containerActionDir := getContainerActionPaths(sal.getStepModel(), actionDir, sal.RunContext)
+		if sal.actionSource == nil {
+			sal.actionSource = &ActionSource{
+				Type:           ActionSourceTypeLocal,
+				Uses:           sal.Step.Uses,
+				ExecutionDir:   filepath.Join(sal.RunContext.Config.Workdir, sal.Step.Uses),
+				Workdir:        sal.RunContext.Config.Workdir,
+				ActionCacheDir: sal.RunContext.ActionCacheDir(),
+			}
+		}
+		_, containerActionDir := sal.actionSource.ContainerActionPaths(sal.RunContext)
 
 		sal.compositeRunContext = newCompositeRunContext(ctx, sal.RunContext, sal, containerActionDir)
 		sal.compositeSteps = sal.compositeRunContext.compositeExecutor(sal.action)
