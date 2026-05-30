@@ -65,10 +65,11 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 		if err != nil {
 			return err
 		}
-		plan, err := planner.PlanEvent("workflow_call")
-		if err != nil {
-			return err
+		result := planner.NewPipeline().Execute(model.SelectByEvent("workflow_call"))
+		if result.Error != nil {
+			return result.Error
 		}
+		plan := result.Plan
 
 		runner, err := NewReusableWorkflowRunner(rc)
 		if err != nil {
@@ -120,10 +121,11 @@ func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow stri
 			return err
 		}
 
-		plan, err := planner.PlanEvent("workflow_call")
-		if err != nil {
-			return err
+		result := planner.NewPipeline().Execute(model.SelectByEvent("workflow_call"))
+		if result.Error != nil {
+			return result.Error
 		}
+		plan := result.Plan
 
 		runner, err := NewReusableWorkflowRunner(rc)
 		if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/adrg/xdg"
 	"github.com/andreaskoch/go-fswatch"
 	"github.com/joho/godotenv"
+	docker_container "github.com/moby/moby/api/types/container"
 	gitignore "github.com/sabhiram/go-gitignore"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -27,8 +28,8 @@ import (
 	"github.com/nektos/act/pkg/artifactcache"
 	"github.com/nektos/act/pkg/artifacts"
 	"github.com/nektos/act/pkg/common"
-	"github.com/nektos/act/pkg/config"
 	"github.com/nektos/act/pkg/container"
+	"github.com/nektos/act/pkg/gh"
 	"github.com/nektos/act/pkg/model"
 	"github.com/nektos/act/pkg/runner"
 )
@@ -316,103 +317,6 @@ func cleanup(inputs *Input) func(*cobra.Command, []string) {
 	}
 }
 
-func (i *Input) ToConfigAdapter(cmd *cobra.Command) *config.InputAdapter {
-	flags := cmd.Flags()
-	return &config.InputAdapter{
-		Actor:                              ptrIfSet(flags, "actor", i.actor),
-		Workdir:                            ptrIfSet(flags, "directory", i.workdir),
-		WorkflowsPath:                      ptrIfSet(flags, "file", i.workflowsPath),
-		AutodetectEvent:                    ptrIfSetBool(flags, "detect-event", i.autodetectEvent),
-		EventPath:                          ptrIfSet(flags, "eventpath", i.eventPath),
-		ReuseContainers:                    ptrIfSetBool(flags, "reuse", i.reuseContainers),
-		BindWorkdir:                        ptrIfSetBool(flags, "bind", i.bindWorkdir),
-		Secrets:                            ptrIfSetSlice(flags, "secret", i.secrets),
-		Vars:                               ptrIfSetSlice(flags, "var", i.vars),
-		Envs:                               ptrIfSetSlice(flags, "env", i.envs),
-		Inputs:                             ptrIfSetSlice(flags, "input", i.inputs),
-		Platforms:                          ptrIfSetSlice(flags, "platform", i.platforms),
-		Dryrun:                             ptrIfSetBool(flags, "dryrun", i.dryrun),
-		ForcePull:                          ptrIfSetBool(flags, "pull", i.forcePull),
-		ForceRebuild:                       ptrIfSetBool(flags, "forcepull", i.forceRebuild),
-		NoOutput:                           ptrIfSetBool(flags, "quiet", i.noOutput),
-		Envfile:                            ptrIfSet(flags, "env-file", i.envfile),
-		Inputfile:                          ptrIfSet(flags, "input-file", i.inputfile),
-		Secretfile:                         ptrIfSet(flags, "secret-file", i.secretfile),
-		Varfile:                            ptrIfSet(flags, "var-file", i.varfile),
-		InsecureSecrets:                    ptrIfSetBool(flags, "insecure-secrets", i.insecureSecrets),
-		DefaultBranch:                      ptrIfSet(flags, "defaultbranch", i.defaultBranch),
-		Privileged:                         ptrIfSetBool(flags, "privileged", i.privileged),
-		UsernsMode:                         ptrIfSet(flags, "userns", i.usernsMode),
-		ContainerArchitecture:              ptrIfSet(flags, "container-architecture", i.containerArchitecture),
-		ContainerDaemonSocket:              ptrIfSet(flags, "docker-sock", i.containerDaemonSocket),
-		ContainerOptions:                   ptrIfSet(flags, "container-options", i.containerOptions),
-		NoWorkflowRecurse:                  ptrIfSetBool(flags, "no-workflow-recurse", i.noWorkflowRecurse),
-		UseGitIgnore:                       ptrIfSetBool(flags, "use-gitignore", i.useGitIgnore),
-		GitHubInstance:                     ptrIfSet(flags, "github-instance", i.githubInstance),
-		ContainerCapAdd:                    ptrIfSetSlice(flags, "container-cap-add", i.containerCapAdd),
-		ContainerCapDrop:                   ptrIfSetSlice(flags, "container-cap-drop", i.containerCapDrop),
-		AutoRemove:                         ptrIfSetBool(flags, "rm", i.autoRemove),
-		ArtifactServerPath:                 ptrIfSet(flags, "artifact-server-path", i.artifactServerPath),
-		ArtifactServerAddr:                 ptrIfSet(flags, "artifact-server-addr", i.artifactServerAddr),
-		ArtifactServerPort:                 ptrIfSet(flags, "artifact-server-port", i.artifactServerPort),
-		NoCacheServer:                      ptrIfSetBool(flags, "no-cache-server", i.noCacheServer),
-		CacheServerPath:                    ptrIfSet(flags, "cache-server-path", i.cacheServerPath),
-		CacheServerExternalURL:             ptrIfSet(flags, "cache-server-external-url", i.cacheServerExternalURL),
-		CacheServerAddr:                    ptrIfSet(flags, "cache-server-addr", i.cacheServerAddr),
-		CacheServerPort:                    ptrIfSetUint16(flags, "cache-server-port", i.cacheServerPort),
-		JSONLogger:                         ptrIfSetBool(flags, "json", i.jsonLogger),
-		NoSkipCheckout:                     ptrIfSetBool(flags, "no-skip-checkout", i.noSkipCheckout),
-		RemoteName:                         ptrIfSet(flags, "remote-name", i.remoteName),
-		ReplaceGheActionWithGithubCom:      ptrIfSetSlice(flags, "replace-ghe-action-with-github-com", i.replaceGheActionWithGithubCom),
-		ReplaceGheActionTokenWithGithubCom: ptrIfSet(flags, "replace-ghe-action-token-with-github-com", i.replaceGheActionTokenWithGithubCom),
-		Matrix:                             ptrIfSetSlice(flags, "matrix", i.matrix),
-		ActionCachePath:                    ptrIfSet(flags, "action-cache-path", i.actionCachePath),
-		ActionOfflineMode:                  ptrIfSetBool(flags, "action-offline-mode", i.actionOfflineMode),
-		LogPrefixJobID:                     ptrIfSetBool(flags, "log-prefix-job-id", i.logPrefixJobID),
-		NetworkName:                        ptrIfSet(flags, "network", i.networkName),
-		UseNewActionCache:                  ptrIfSetBool(flags, "use-new-action-cache", i.useNewActionCache),
-		LocalRepository:                    ptrIfSetSlice(flags, "local-repository", i.localRepository),
-		ConcurrentJobs:                     ptrIfSetInt(flags, "concurrent-jobs", i.concurrentJobs),
-		Validate:                           ptrIfSetBool(flags, "validate", i.validate),
-		Strict:                             ptrIfSetBool(flags, "strict", i.strict),
-	}
-}
-
-func ptrIfSet(flags *pflag.FlagSet, name string, val string) *string {
-	if flags.Changed(name) {
-		return &val
-	}
-	return nil
-}
-
-func ptrIfSetBool(flags *pflag.FlagSet, name string, val bool) *bool {
-	if flags.Changed(name) {
-		return &val
-	}
-	return nil
-}
-
-func ptrIfSetSlice(flags *pflag.FlagSet, name string, val []string) *[]string {
-	if flags.Changed(name) {
-		return &val
-	}
-	return nil
-}
-
-func ptrIfSetUint16(flags *pflag.FlagSet, name string, val uint16) *uint16 {
-	if flags.Changed(name) {
-		return &val
-	}
-	return nil
-}
-
-func ptrIfSetInt(flags *pflag.FlagSet, name string, val int) *int {
-	if flags.Changed(name) {
-		return &val
-	}
-	return nil
-}
-
 func parseEnvs(env []string) map[string]string {
 	envs := make(map[string]string, len(env))
 	for _, envVar := range env {
@@ -483,6 +387,7 @@ func parseMatrix(matrix []string) map[string]map[string]bool {
 	return matrixes
 }
 
+//nolint:gocyclo
 func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		if input.jsonLogger {
@@ -501,64 +406,49 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return listOptions(cmd)
 		}
 
-		// --- Stage 1: Load & normalize configuration ---
-		execConfig, err := config.NewPipeline(ctx).
-			LoadDefaults().
-			LoadActrc().
-			LoadFromInput(input.ToConfigAdapter(cmd)).
-			LoadFiles().
-			Normalize()
-		if err != nil {
-			return err
+		if ret, err := container.GetSocketAndHost(input.containerDaemonSocket); err != nil {
+			log.Warnf("Couldn't get a valid docker connection: %+v", err)
+		} else {
+			os.Setenv("DOCKER_HOST", ret.Host)
+			input.containerDaemonSocket = ret.Socket
+			log.Infof("Using docker host '%s', and daemon socket '%s'", ret.Host, ret.Socket)
 		}
 
-		// --- Stage 1b: Platform survey (writes .actrc, then reload platforms) ---
-		if len(input.platforms) == 0 {
-			cfgFound := false
-			cfgLocations := config.ConfigLocations()
-			for _, v := range cfgLocations {
-				if _, err := os.Stat(v); err == nil {
-					cfgFound = true
-					break
-				}
-			}
-			if !cfgFound && len(cfgLocations) > 0 {
-				if err := config.DefaultImageSurvey(cfgLocations[0]); err != nil {
-					log.Fatal(err)
-				}
-				platformArgs := config.ReadArgsFile(cfgLocations[0], true)
-				execConfig.Platforms = config.ParsePlatforms(platformArgs)
-			}
-		}
-
-		// --- Warnings ---
-		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && execConfig.ContainerArchitecture == "" {
+		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && input.containerArchitecture == "" {
 			l := log.New()
 			l.SetFormatter(&log.TextFormatter{
 				DisableQuote:     true,
 				DisableTimestamp: true,
 			})
-			l.Warnf(" \u26a0 You are using Apple M-series chip and you have not specified container architecture, you might encounter issues while running act. If so, try running it with '--container-architecture linux/amd64'. \u26a0 \n")
+			l.Warnf(" \U000026A0 You are using Apple M-series chip and you have not specified container architecture, you might encounter issues while running act. If so, try running it with '--container-architecture linux/amd64'. \U000026A0 \n")
 		}
 
-		deprecationWarning := "--%s is deprecated and will be removed soon, please switch to cli: `--container-options \"%[2]s\"` or `.actrc`: `--container-options %[2]s`."
-		if execConfig.Privileged {
-			log.Warnf(deprecationWarning, "privileged", "--privileged")
-		}
-		if execConfig.UsernsMode != "" {
-			log.Warnf(deprecationWarning, "userns", fmt.Sprintf("--userns=%s", execConfig.UsernsMode))
-		}
-		if len(execConfig.ContainerCapAdd) > 0 {
-			log.Warnf(deprecationWarning, "container-cap-add", fmt.Sprintf("--cap-add=%s", execConfig.ContainerCapAdd))
-		}
-		if len(execConfig.ContainerCapDrop) > 0 {
-			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", execConfig.ContainerCapDrop))
+		log.Debugf("Loading environment from %s", input.Envfile())
+		envs := parseEnvs(input.envs)
+		_ = readEnvs(input.Envfile(), envs)
+
+		log.Debugf("Loading action inputs from %s", input.Inputfile())
+		inputs := parseEnvs(input.inputs)
+		_ = readEnvs(input.Inputfile(), inputs)
+
+		log.Debugf("Loading secrets from %s", input.Secretfile())
+		secrets := newSecrets(input.secrets)
+		_ = readEnvsEx(input.Secretfile(), secrets, true)
+
+		if _, hasGitHubToken := secrets["GITHUB_TOKEN"]; !hasGitHubToken {
+			ctx, cancel := common.EarlyCancelContext(ctx)
+			defer cancel()
+			secrets["GITHUB_TOKEN"], _ = gh.GetToken(ctx, "")
 		}
 
-		log.Debugf("Evaluated matrix inclusions: %v", execConfig.Matrix)
+		log.Debugf("Loading vars from %s", input.Varfile())
+		vars := newSecrets(input.vars)
+		_ = readEnvs(input.Varfile(), vars)
 
-		// --- Stage 2: Workflow planning ---
-		planner, err := model.NewWorkflowPlanner(execConfig.WorkflowsPath, execConfig.NoWorkflowRecurse, execConfig.Strict)
+		matrixes := parseMatrix(input.matrix)
+		log.Debugf("Evaluated matrix inclusions: %v", matrixes)
+
+		planner, err := model.NewWorkflowPlanner(input.WorkflowsPath(), input.noWorkflowRecurse, input.strict)
 		if err != nil {
 			return err
 		}
@@ -573,185 +463,182 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return err
 		}
 
-		if execConfig.Validate {
-			return nil
-		}
-
 		graph, err := cmd.Flags().GetBool("graph")
 		if err != nil {
 			return err
 		}
 
-		events := planner.GetEvents()
-
-		// Determine filter event name
-		var filterEventName string
+		var policy *model.SelectionPolicy
 		if len(args) > 0 {
-			log.Debugf("Using first passed in arguments event for filtering: %s", args[0])
-			filterEventName = args[0]
-		} else if execConfig.AutodetectEvent && len(events) > 0 {
-			log.Debugf("Using first detected workflow event for filtering: %s", events[0])
-			filterEventName = events[0]
-		}
-
-		var plannerErr error
-		var filterPlan *model.Plan
-
-		if jobID != "" {
-			log.Debugf("Preparing plan with a job: %s", jobID)
-			filterPlan, plannerErr = planner.PlanJob(jobID)
-		} else if filterEventName != "" {
-			log.Debugf("Preparing plan for a event: %s", filterEventName)
-			filterPlan, plannerErr = planner.PlanEvent(filterEventName)
+			policy = model.SelectByEvent(args[0])
+		} else if jobID != "" {
+			policy = model.SelectByJob(jobID)
 		} else {
-			log.Debugf("Preparing plan with all jobs")
-			filterPlan, plannerErr = planner.PlanAll()
+			policy = model.SelectWithAutoDetect().WithAutoDetect(input.autodetectEvent)
 		}
-		if filterPlan == nil && plannerErr != nil {
+		policy.WithMatrix(matrixes)
+
+		result := planner.NewPipeline().Execute(policy)
+		plan := result.Plan
+		eventName := result.EventName
+		plannerErr := result.Error
+
+		if plan == nil && plannerErr != nil {
+			return plannerErr
+		}
+
+		if input.validate {
 			return plannerErr
 		}
 
 		if list {
-			if err := printList(filterPlan); err != nil {
+			err = printList(plan)
+			if err != nil {
 				return err
 			}
 			return plannerErr
 		}
 
 		if graph {
-			if err := drawGraph(filterPlan); err != nil {
+			err = drawGraph(plan)
+			if err != nil {
 				return err
 			}
 			return plannerErr
 		}
 
-		// Determine execute event name
-		var eventName string
-		if len(args) > 0 {
-			log.Debugf("Using first passed in arguments event: %s", args[0])
-			eventName = args[0]
-		} else if len(events) == 1 {
-			log.Debugf("Using the only detected workflow event: %s", events[0])
-			eventName = events[0]
-		} else if execConfig.AutodetectEvent && len(events) > 0 {
-			log.Debugf("Using first detected workflow event: %s", events[0])
-			eventName = events[0]
-		} else {
-			log.Debugf("Using default workflow event: push")
-			eventName = "push"
-		}
-
-		execConfig.EventName = eventName
-
-		// Build execution plan
-		var plan *model.Plan
-		if jobID != "" {
-			log.Debugf("Planning job: %s", jobID)
-			plan, plannerErr = planner.PlanJob(jobID)
-		} else {
-			log.Debugf("Planning jobs for event: %s", eventName)
-			plan, plannerErr = planner.PlanEvent(eventName)
-		}
-		if plan != nil && len(plan.Stages) == 0 {
-			plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
-		}
-		if plan == nil && plannerErr != nil {
-			return plannerErr
-		}
-
-		// --- Stage 3: Build runner config from normalized execution config ---
-		var actionCache runner.ActionCache
-		if execConfig.UseNewActionCache || len(execConfig.LocalRepository) > 0 {
-			if execConfig.ActionOfflineMode {
-				actionCache = &runner.GoGitActionCacheOfflineMode{
-					Parent: runner.GoGitActionCache{
-						Path: execConfig.ActionCacheDir,
-					},
-				}
-			} else {
-				actionCache = &runner.GoGitActionCache{
-					Path: execConfig.ActionCacheDir,
-				}
-			}
-			if len(execConfig.LocalRepository) > 0 {
-				actionCache = &runner.LocalRepositoryCache{
-					Parent:            actionCache,
-					LocalRepositories: execConfig.LocalRepository,
-					CacheDirCache:     map[string]string{},
-				}
+		if plan != nil {
+			if len(plan.Stages) == 0 {
+				plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
 			}
 		}
 
-		runnerConfig := &runner.Config{
-			Actor:                              execConfig.Actor,
-			EventName:                          execConfig.EventName,
-			EventPath:                          execConfig.EventPath,
-			DefaultBranch:                      execConfig.DefaultBranch,
-			ForcePull:                          execConfig.ForcePull,
-			ForceRebuild:                       execConfig.ForceRebuild,
-			ReuseContainers:                    execConfig.ReuseContainers,
-			Workdir:                            execConfig.Workdir,
-			ActionCacheDir:                     execConfig.ActionCacheDir,
-			ActionOfflineMode:                  execConfig.ActionOfflineMode,
-			BindWorkdir:                        execConfig.BindWorkdir,
-			LogOutput:                          execConfig.LogOutput,
-			JSONLogger:                         execConfig.JSONLogger,
-			LogPrefixJobID:                     execConfig.LogPrefixJobID,
-			Env:                                execConfig.Env,
-			Secrets:                            execConfig.Secrets,
-			Vars:                               execConfig.Vars,
-			Inputs:                             execConfig.Inputs,
-			Token:                              execConfig.Token,
-			InsecureSecrets:                    execConfig.InsecureSecrets,
-			Platforms:                          execConfig.Platforms,
-			Privileged:                         execConfig.Privileged,
-			UsernsMode:                         execConfig.UsernsMode,
-			ContainerArchitecture:              execConfig.ContainerArchitecture,
-			ContainerDaemonSocket:              execConfig.ContainerDaemonSocket,
-			ContainerOptions:                   execConfig.ContainerOptions,
-			UseGitIgnore:                       execConfig.UseGitIgnore,
-			GitHubInstance:                     execConfig.GitHubInstance,
-			ContainerCapAdd:                    execConfig.ContainerCapAdd,
-			ContainerCapDrop:                   execConfig.ContainerCapDrop,
-			AutoRemove:                         execConfig.AutoRemove,
-			ArtifactServerPath:                 execConfig.ArtifactServerPath,
-			ArtifactServerAddr:                 execConfig.ArtifactServerAddr,
-			ArtifactServerPort:                 execConfig.ArtifactServerPort,
-			NoSkipCheckout:                     execConfig.NoSkipCheckout,
-			RemoteName:                         execConfig.RemoteName,
-			ReplaceGheActionWithGithubCom:      execConfig.ReplaceGheActionWithGithubCom,
-			ReplaceGheActionTokenWithGithubCom: execConfig.ReplaceGheActionTokenWithGithubCom,
-			Matrix:                             execConfig.Matrix,
-			ContainerNetworkMode:               execConfig.ContainerNetworkMode,
-			ActionCache:                        actionCache,
-			ConcurrentJobs:                     execConfig.ConcurrentJobs,
-		}
-
-		r, err := runner.New(runnerConfig)
+		// check to see if the main branch was defined
+		defaultbranch, err := cmd.Flags().GetString("defaultbranch")
 		if err != nil {
 			return err
 		}
 
-		// --- Stage 4: Start servers & execute ---
-		cancel := artifacts.Serve(ctx, execConfig.ArtifactServerPath, execConfig.ArtifactServerAddr, execConfig.ArtifactServerPort)
+		// Check if platforms flag is set, if not, run default image survey
+		if len(input.platforms) == 0 {
+			cfgFound := false
+			cfgLocations := configLocations()
+			for _, v := range cfgLocations {
+				_, err := os.Stat(v)
+				if os.IsExist(err) {
+					cfgFound = true
+				}
+			}
+			if !cfgFound && len(cfgLocations) > 0 {
+				// The first config location refers to the global config folder one
+				if err := defaultImageSurvey(cfgLocations[0]); err != nil {
+					log.Fatal(err)
+				}
+				input.platforms = readArgsFile(cfgLocations[0], true)
+			}
+		}
+		deprecationWarning := "--%s is deprecated and will be removed soon, please switch to cli: `--container-options \"%[2]s\"` or `.actrc`: `--container-options %[2]s`."
+		if input.privileged {
+			log.Warnf(deprecationWarning, "privileged", "--privileged")
+		}
+		if len(input.usernsMode) > 0 {
+			log.Warnf(deprecationWarning, "userns", fmt.Sprintf("--userns=%s", input.usernsMode))
+		}
+		if len(input.containerCapAdd) > 0 {
+			log.Warnf(deprecationWarning, "container-cap-add", fmt.Sprintf("--cap-add=%s", input.containerCapAdd))
+		}
+		if len(input.containerCapDrop) > 0 {
+			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", input.containerCapDrop))
+		}
+
+		// run the plan
+		config := &runner.Config{
+			Actor:                              input.actor,
+			EventName:                          eventName,
+			EventPath:                          input.EventPath(),
+			DefaultBranch:                      defaultbranch,
+			ForcePull:                          !input.actionOfflineMode && input.forcePull,
+			ForceRebuild:                       input.forceRebuild,
+			ReuseContainers:                    input.reuseContainers,
+			Workdir:                            input.Workdir(),
+			ActionCacheDir:                     input.actionCachePath,
+			ActionOfflineMode:                  input.actionOfflineMode,
+			BindWorkdir:                        input.bindWorkdir,
+			LogOutput:                          !input.noOutput,
+			JSONLogger:                         input.jsonLogger,
+			LogPrefixJobID:                     input.logPrefixJobID,
+			Env:                                envs,
+			Secrets:                            secrets,
+			Vars:                               vars,
+			Inputs:                             inputs,
+			Token:                              secrets["GITHUB_TOKEN"],
+			InsecureSecrets:                    input.insecureSecrets,
+			Platforms:                          input.newPlatforms(),
+			Privileged:                         input.privileged,
+			UsernsMode:                         input.usernsMode,
+			ContainerArchitecture:              input.containerArchitecture,
+			ContainerDaemonSocket:              input.containerDaemonSocket,
+			ContainerOptions:                   input.containerOptions,
+			UseGitIgnore:                       input.useGitIgnore,
+			GitHubInstance:                     input.githubInstance,
+			ContainerCapAdd:                    input.containerCapAdd,
+			ContainerCapDrop:                   input.containerCapDrop,
+			AutoRemove:                         input.autoRemove,
+			ArtifactServerPath:                 input.artifactServerPath,
+			ArtifactServerAddr:                 input.artifactServerAddr,
+			ArtifactServerPort:                 input.artifactServerPort,
+			NoSkipCheckout:                     input.noSkipCheckout,
+			RemoteName:                         input.remoteName,
+			ReplaceGheActionWithGithubCom:      input.replaceGheActionWithGithubCom,
+			ReplaceGheActionTokenWithGithubCom: input.replaceGheActionTokenWithGithubCom,
+			Matrix:                             matrixes,
+			ContainerNetworkMode:               docker_container.NetworkMode(input.networkName),
+			ConcurrentJobs:                     input.concurrentJobs,
+		}
+		if input.useNewActionCache || len(input.localRepository) > 0 {
+			if input.actionOfflineMode {
+				config.ActionCache = &runner.GoGitActionCacheOfflineMode{
+					Parent: runner.GoGitActionCache{
+						Path: config.ActionCacheDir,
+					},
+				}
+			} else {
+				config.ActionCache = &runner.GoGitActionCache{
+					Path: config.ActionCacheDir,
+				}
+			}
+			if len(input.localRepository) > 0 {
+				localRepositories := map[string]string{}
+				for _, l := range input.localRepository {
+					k, v, _ := strings.Cut(l, "=")
+					localRepositories[k] = v
+				}
+				config.ActionCache = &runner.LocalRepositoryCache{
+					Parent:            config.ActionCache,
+					LocalRepositories: localRepositories,
+					CacheDirCache:     map[string]string{},
+				}
+			}
+		}
+		r, err := runner.New(config)
+		if err != nil {
+			return err
+		}
+
+		cancel := artifacts.Serve(ctx, input.artifactServerPath, input.artifactServerAddr, input.artifactServerPort)
 
 		const cacheURLKey = "ACTIONS_CACHE_URL"
 		var cacheHandler *artifactcache.Handler
-		if !execConfig.NoCacheServer && execConfig.Env[cacheURLKey] == "" {
-			cacheHandler, err = artifactcache.StartHandler(
-				execConfig.CacheServerPath,
-				execConfig.CacheServerExternalURL,
-				execConfig.CacheServerAddr,
-				execConfig.CacheServerPort,
-				common.Logger(ctx),
-			)
+		if !input.noCacheServer && envs[cacheURLKey] == "" {
+			var err error
+			cacheHandler, err = artifactcache.StartHandler(input.cacheServerPath, input.cacheServerExternalURL, input.cacheServerAddr, input.cacheServerPort, common.Logger(ctx))
 			if err != nil {
 				return err
 			}
-			execConfig.Env[cacheURLKey] = cacheHandler.ExternalURL() + "/"
+			envs[cacheURLKey] = cacheHandler.ExternalURL() + "/"
 		}
 
-		ctx = common.WithDryrun(ctx, execConfig.Dryrun)
+		ctx = common.WithDryrun(ctx, input.dryrun)
 		if watch, err := cmd.Flags().GetBool("watch"); err != nil {
 			return err
 		} else if watch {

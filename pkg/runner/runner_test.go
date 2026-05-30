@@ -63,12 +63,16 @@ func TestNoWorkflowsFoundByPlanner(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	log.SetLevel(log.DebugLevel)
-	plan, err := planner.PlanEvent("pull_request")
+	result := planner.NewPipeline().Execute(model.SelectByEvent("pull_request"))
+	plan := result.Plan
+	err = result.Error
 	assert.NotNil(t, plan)
 	assert.NoError(t, err)
 	assert.Contains(t, buf.String(), "no workflows found by planner")
 	buf.Reset()
-	plan, err = planner.PlanAll()
+	result = planner.NewPipeline().Execute(model.SelectAllJobs())
+	plan = result.Plan
+	err = result.Error
 	assert.NotNil(t, plan)
 	assert.NoError(t, err)
 	assert.Contains(t, buf.String(), "no workflows found by planner")
@@ -84,7 +88,9 @@ func TestGraphMissingEvent(t *testing.T) {
 	log.SetOutput(&buf)
 	log.SetLevel(log.DebugLevel)
 
-	plan, err := planner.PlanEvent("push")
+	result := planner.NewPipeline().Execute(model.SelectByEvent("push"))
+	plan := result.Plan
+	err = result.Error
 	assert.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.Equal(t, 0, len(plan.Stages))
@@ -97,7 +103,9 @@ func TestGraphMissingFirst(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("testdata/issue-1595/no-first.yml", true, false)
 	assert.NoError(t, err)
 
-	plan, err := planner.PlanEvent("push")
+	result := planner.NewPipeline().Execute(model.SelectByEvent("push"))
+	plan := result.Plan
+	err = result.Error
 	assert.EqualError(t, err, "unable to build dependency graph for no first (no-first.yml)")
 	assert.NotNil(t, plan)
 	assert.Equal(t, 0, len(plan.Stages))
@@ -112,7 +120,9 @@ func TestGraphWithMissing(t *testing.T) {
 	log.SetOutput(&buf)
 	log.SetLevel(log.DebugLevel)
 
-	plan, err := planner.PlanEvent("push")
+	result := planner.NewPipeline().Execute(model.SelectByEvent("push"))
+	plan := result.Plan
+	err = result.Error
 	assert.NotNil(t, plan)
 	assert.Equal(t, 0, len(plan.Stages))
 	assert.EqualError(t, err, "unable to build dependency graph for missing (missing.yml)")
@@ -131,7 +141,9 @@ func TestGraphWithSomeMissing(t *testing.T) {
 	log.SetOutput(&buf)
 	log.SetLevel(log.DebugLevel)
 
-	plan, err := planner.PlanAll()
+	result := planner.NewPipeline().Execute(model.SelectAllJobs())
+	plan := result.Plan
+	err = result.Error
 	assert.Error(t, err, "unable to build dependency graph for no first (no-first.yml)")
 	assert.NotNil(t, plan)
 	assert.Equal(t, 1, len(plan.Stages))
@@ -144,7 +156,9 @@ func TestGraphEvent(t *testing.T) {
 	planner, err := model.NewWorkflowPlanner("testdata/basic", true, false)
 	assert.NoError(t, err)
 
-	plan, err := planner.PlanEvent("push")
+	result := planner.NewPipeline().Execute(model.SelectByEvent("push"))
+	plan := result.Plan
+	err = result.Error
 	assert.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.NotNil(t, plan.Stages)
@@ -156,7 +170,9 @@ func TestGraphEvent(t *testing.T) {
 	assert.Equal(t, plan.Stages[1].Runs[0].JobID, "build", "jobid")
 	assert.Equal(t, plan.Stages[2].Runs[0].JobID, "test", "jobid")
 
-	plan, err = planner.PlanEvent("release")
+	result = planner.NewPipeline().Execute(model.SelectByEvent("release"))
+	plan = result.Plan
+	err = result.Error
 	assert.NoError(t, err)
 	assert.NotNil(t, plan)
 	assert.Equal(t, 0, len(plan.Stages))
@@ -203,7 +219,9 @@ func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config
 	if j.errorMessage != "" && err != nil {
 		assert.Error(t, err, j.errorMessage)
 	} else if assert.Nil(t, err, fullWorkflowPath) {
-		plan, err := planner.PlanEvent(j.eventName)
+		result := planner.NewPipeline().Execute(model.SelectByEvent(j.eventName))
+		plan := result.Plan
+		err = result.Error
 		assert.True(t, (err == nil) != (plan == nil), "PlanEvent should return either a plan or an error")
 		if err == nil && plan != nil {
 			err = runner.NewPlanExecutor(plan)(ctx)
