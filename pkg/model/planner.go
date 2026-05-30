@@ -5,12 +5,10 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -21,69 +19,6 @@ type WorkflowPlanner interface {
 	PlanJob(jobName string) (*Plan, error)
 	PlanAll() (*Plan, error)
 	GetEvents() []string
-	ExpandMatrix(plan *Plan) (*Plan, error)
-}
-
-type MatrixSelector struct {
-	dimensions map[string]map[string]bool
-	matrixKey  string
-}
-
-func NewMatrixSelector(dimensions map[string]map[string]bool, matrixKey string) *MatrixSelector {
-	return &MatrixSelector{dimensions: dimensions, matrixKey: matrixKey}
-}
-
-func (s *MatrixSelector) Match(run *Run) bool {
-	if s == nil {
-		return true
-	}
-	if len(s.dimensions) > 0 {
-		if run.Matrix == nil || len(run.Matrix) == 0 {
-			return false
-		}
-		if !run.MatchesMatrixFilter(s.dimensions) {
-			return false
-		}
-	}
-	if s.matrixKey != "" && run.MatrixKey != s.matrixKey {
-		return false
-	}
-	return true
-}
-
-func (s *MatrixSelector) IsEmpty() bool {
-	if s == nil {
-		return true
-	}
-	return len(s.dimensions) == 0 && s.matrixKey == ""
-}
-
-func (s *MatrixSelector) Reason() string {
-	if s.IsEmpty() {
-		return ""
-	}
-	var parts []string
-	if len(s.dimensions) > 0 {
-		keys := make([]string, 0, len(s.dimensions))
-		for k := range s.dimensions {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		dimParts := make([]string, 0, len(keys))
-		for _, k := range keys {
-			vals := make([]string, 0, len(s.dimensions[k]))
-			for v := range s.dimensions[k] {
-				vals = append(vals, v)
-			}
-			sort.Strings(vals)
-			dimParts = append(dimParts, fmt.Sprintf("%s=%s", k, strings.Join(vals, "|")))
-		}
-		parts = append(parts, "matrix="+strings.Join(dimParts, ", "))
-	}
-	if s.matrixKey != "" {
-		parts = append(parts, "matrix-key="+s.matrixKey)
-	}
-	return strings.Join(parts, ", ")
 }
 
 // Plan contains a list of stages to run in series
@@ -98,10 +33,8 @@ type Stage struct {
 
 // Run represents a job from a workflow that needs to be run
 type Run struct {
-	Workflow  *Workflow
-	JobID     string
-	Matrix    map[string]interface{}
-	MatrixKey string
+	Workflow *Workflow
+	JobID    string
 }
 
 func (r *Run) String() string {
@@ -109,78 +42,7 @@ func (r *Run) String() string {
 	if jobName == "" {
 		jobName = r.JobID
 	}
-	if r.Matrix != nil && len(r.Matrix) > 0 {
-		return fmt.Sprintf("%s (%s)", jobName, FormatMatrix(r.Matrix))
-	}
 	return jobName
-}
-
-// DisplayName returns a human-readable name for the run including matrix info
-func (r *Run) DisplayName() string {
-	return r.String()
-}
-
-// SimpleName returns the job name without matrix info
-func (r *Run) SimpleName() string {
-	jobName := r.Job().Name
-	if jobName == "" {
-		jobName = r.JobID
-	}
-	return jobName
-}
-
-// FormatMatrix formats a matrix map as a human-readable string
-func FormatMatrix(matrix map[string]interface{}) string {
-	if len(matrix) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(matrix))
-	for k := range matrix {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%v", k, matrix[k]))
-	}
-	return strings.Join(parts, ", ")
-}
-
-func ComputeMatrixKey(matrix map[string]interface{}) string {
-	if len(matrix) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(matrix))
-	for k := range matrix {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		v := url.QueryEscape(fmt.Sprintf("%v", matrix[k]))
-		parts = append(parts, url.QueryEscape(k)+"="+v)
-	}
-	return strings.Join(parts, "&")
-}
-
-// MatchesMatrixFilter checks if the run's matrix matches the given filter.
-// The filter is a map of dimension key to allowed values (as strings).
-// Multiple dimensions are ANDed together.
-func (r *Run) MatchesMatrixFilter(filter map[string]map[string]bool) bool {
-	if r.Matrix == nil || len(filter) == 0 {
-		return true
-	}
-	for key, allowedVals := range filter {
-		val, ok := r.Matrix[key]
-		if !ok {
-			return false
-		}
-		valStr := fmt.Sprintf("%v", val)
-		if _, ok := allowedVals[valStr]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // Job returns the job for this Run
@@ -438,56 +300,6 @@ func (wp *workflowPlanner) GetEvents() []string {
 	return events
 }
 
-// ExpandMatrix expands matrix jobs in the plan into individual runs with specific matrix combinations.
-// If filter is provided, only matrix combinations matching the filter are included.
-func (wp *workflowPlanner) ExpandMatrix(plan *Plan) (*Plan, error) {
-	if plan == nil {
-		return nil, fmt.Errorf("plan is nil")
-	}
-
-	newPlan := &Plan{}
-
-	for _, stage := range plan.Stages {
-		newStage := &Stage{}
-
-		for _, run := range stage.Runs {
-			job := run.Job()
-			if job == nil {
-				continue
-			}
-
-			matrixes, err := job.GetMatrixes()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get matrixes for job %s: %w", run.JobID, err)
-			}
-
-			for _, matrix := range matrixes {
-				newRun := &Run{
-					Workflow:  run.Workflow,
-					JobID:     run.JobID,
-					Matrix:    matrix,
-					MatrixKey: ComputeMatrixKey(matrix),
-				}
-
-				newStage.Runs = append(newStage.Runs, newRun)
-			}
-		}
-
-		if len(newStage.Runs) > 0 {
-			newPlan.Stages = append(newPlan.Stages, newStage)
-		}
-	}
-
-	log.Debugf("Expanded matrix plan: original stages=%d, new stages=%d", len(plan.Stages), len(newPlan.Stages))
-	for i, stage := range newPlan.Stages {
-		for _, run := range stage.Runs {
-			log.Debugf("  Stage %d: %s", i, run.String())
-		}
-	}
-
-	return newPlan, nil
-}
-
 // MaxRunNameLen determines the max name length of all jobs
 func (p *Plan) MaxRunNameLen() int {
 	maxRunNameLen := 0
@@ -500,34 +312,6 @@ func (p *Plan) MaxRunNameLen() int {
 		}
 	}
 	return maxRunNameLen
-}
-
-// FilterRuns filters runs in the plan based on the given filter function.
-// Only runs for which the filter returns true are kept.
-func (p *Plan) FilterRuns(filter func(*Run) bool) *Plan {
-	newPlan := &Plan{}
-	for _, stage := range p.Stages {
-		newStage := &Stage{}
-		for _, run := range stage.Runs {
-			if filter(run) {
-				newStage.Runs = append(newStage.Runs, run)
-			}
-		}
-		if len(newStage.Runs) > 0 {
-			newPlan.Stages = append(newPlan.Stages, newStage)
-		}
-	}
-	return newPlan
-}
-
-// IsEmpty returns true if the plan has no runs
-func (p *Plan) IsEmpty() bool {
-	for _, stage := range p.Stages {
-		if len(stage.Runs) > 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // GetJobIDs will get all the job names in the stage

@@ -55,7 +55,6 @@ type Input struct {
 	replaceGheActionWithGithubCom      []string
 	replaceGheActionTokenWithGithubCom string
 	matrix                             []string
-	matrixKey                          string
 	actionCachePath                    string
 	actionOfflineMode                  bool
 	logPrefixJobID                     bool

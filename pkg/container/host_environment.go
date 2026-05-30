@@ -459,6 +459,16 @@ func (e *HostEnvironment) GetHealth(_ context.Context) Health {
 	return HealthHealthy
 }
 
+func (e *HostEnvironment) GetHealthStatus(_ context.Context) HealthStatus {
+	return HealthStatus{
+		Status: HealthHealthy,
+	}
+}
+
+func (e *HostEnvironment) GetServiceName() string {
+	return ""
+}
+
 func (e *HostEnvironment) ReplaceLogWriter(stdout io.Writer, _ io.Writer) (io.Writer, io.Writer) {
 	org := e.StdOut
 	e.StdOut = stdout

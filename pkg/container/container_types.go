@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/docker/go-connections/nat"
 	"github.com/nektos/act/pkg/common"
@@ -30,6 +31,7 @@ type NewContainerInput struct {
 	NetworkAliases []string
 	ExposedPorts   nat.PortSet
 	PortBindings   nat.PortMap
+	ServiceName    string
 }
 
 // FileEntry is a file to copy to a container
@@ -55,6 +57,8 @@ type Container interface {
 	Close() common.Executor
 	ReplaceLogWriter(io.Writer, io.Writer) (io.Writer, io.Writer)
 	GetHealth(ctx context.Context) Health
+	GetHealthStatus(ctx context.Context) HealthStatus
+	GetServiceName() string
 }
 
 // NewDockerBuildExecutorInput the input for the NewDockerBuildExecutor function
@@ -82,3 +86,71 @@ const (
 	HealthHealthy
 	HealthUnHealthy
 )
+
+type HealthStatus struct {
+	Status        Health
+	ContainerID   string
+	ContainerName string
+	ServiceName   string
+	Image         string
+	State         string
+	HealthLog     string
+	FailingStreak int
+}
+
+func (h Health) String() string {
+	switch h {
+	case HealthStarting:
+		return "starting"
+	case HealthHealthy:
+		return "healthy"
+	case HealthUnHealthy:
+		return "unhealthy"
+	default:
+		return "unknown"
+	}
+}
+
+type PortCheckResult struct {
+	Port       string
+	Success    bool
+	Error      string
+	ToolAbsent bool
+}
+
+type ServiceDependencyStatus struct {
+	ServiceName       string
+	ServiceAlias      string
+	ContainerID       string
+	ContainerName     string
+	Image             string
+	ContainerState    string
+	HasHealthCheck    bool
+	HealthStatus      Health
+	HealthLog         string
+	FailingStreak     int
+	Ports             []string
+	PortCheckResults  []PortCheckResult
+	WaitMethod        string
+	AllPortsConnected bool
+}
+
+type ServiceWaitPort struct {
+	HostPort      string
+	ContainerPort string
+	Protocol      string
+}
+
+type ServiceWaitPlan struct {
+	ServiceName  string
+	ServiceAlias string
+	Timeout      time.Duration
+	WaitMethod   string
+	HealthCheck  struct {
+		Enabled  bool
+		Interval time.Duration
+		Retries  int
+	}
+	Ports       []ServiceWaitPort
+	NetworkName string
+}

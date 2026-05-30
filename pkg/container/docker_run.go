@@ -172,28 +172,59 @@ func (cr *containerReference) Remove() common.Executor {
 }
 
 func (cr *containerReference) GetHealth(ctx context.Context) Health {
+	return cr.GetHealthStatus(ctx).Status
+}
+
+func (cr *containerReference) GetHealthStatus(ctx context.Context) HealthStatus {
+	status := HealthStatus{
+		ServiceName:   cr.input.ServiceName,
+		ContainerID:   cr.id,
+		ContainerName: cr.input.Name,
+		Image:         cr.input.Image,
+		Status:        HealthHealthy,
+	}
+
 	inspectResult, err := cr.cli.ContainerInspect(ctx, cr.id, client.ContainerInspectOptions{})
 	logger := common.Logger(ctx)
 	if err != nil {
-		logger.Errorf("failed to query container health %s", err)
-		return HealthUnHealthy
+		logger.Errorf("failed to query container health: %s", err)
+		status.Status = HealthUnHealthy
+		status.HealthLog = fmt.Sprintf("failed to inspect container: %v", err)
+		return status
 	}
 	resp := inspectResult.Container
-	if resp.Config == nil || resp.Config.Healthcheck == nil || resp.State == nil || resp.State.Health == nil || len(resp.Config.Healthcheck.Test) == 1 && strings.EqualFold(resp.Config.Healthcheck.Test[0], "NONE") {
-		logger.Debugf("no container health check defined")
-		return HealthHealthy
+
+	if resp.State != nil {
+		status.State = string(resp.State.Status)
 	}
 
-	logger.Infof("container health of %s (%s) is %s", cr.id, resp.Config.Image, resp.State.Health.Status)
+	if resp.Config == nil || resp.Config.Healthcheck == nil || resp.State == nil || resp.State.Health == nil || len(resp.Config.Healthcheck.Test) == 1 && strings.EqualFold(resp.Config.Healthcheck.Test[0], "NONE") {
+		logger.Debugf("no container health check defined for service %s", cr.input.ServiceName)
+		return status
+	}
+
+	status.FailingStreak = resp.State.Health.FailingStreak
+	if len(resp.State.Health.Log) > 0 {
+		lastLog := resp.State.Health.Log[len(resp.State.Health.Log)-1]
+		status.HealthLog = fmt.Sprintf("ExitCode: %d, Output: %s", lastLog.ExitCode, strings.TrimSpace(lastLog.Output))
+	}
+
+	logger.Infof("container health of service %s (%s) is %s", cr.input.ServiceName, resp.Config.Image, resp.State.Health.Status)
 	switch resp.State.Health.Status {
 	case "starting":
-		return HealthStarting
+		status.Status = HealthStarting
 	case "healthy":
-		return HealthHealthy
+		status.Status = HealthHealthy
 	case "unhealthy":
-		return HealthUnHealthy
+		status.Status = HealthUnHealthy
+	default:
+		status.Status = HealthUnHealthy
 	}
-	return HealthUnHealthy
+	return status
+}
+
+func (cr *containerReference) GetServiceName() string {
+	return cr.input.ServiceName
 }
 
 func (cr *containerReference) ReplaceLogWriter(stdout io.Writer, stderr io.Writer) (io.Writer, io.Writer) {

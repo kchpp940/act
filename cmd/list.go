@@ -16,7 +16,6 @@ func printList(plan *model.Plan) error {
 		wfName  string
 		wfFile  string
 		events  string
-		matrix  string
 	}
 	lineInfos := []lineInfoDef{}
 
@@ -27,12 +26,10 @@ func printList(plan *model.Plan) error {
 		wfName:  "Workflow name",
 		wfFile:  "Workflow file",
 		events:  "Events",
-		matrix:  "Matrix",
 	}
 
 	jobs := map[string]bool{}
 	duplicateJobIDs := false
-	hasMatrix := false
 
 	jobIDMaxWidth := len(header.jobID)
 	jobNameMaxWidth := len(header.jobName)
@@ -40,24 +37,17 @@ func printList(plan *model.Plan) error {
 	wfNameMaxWidth := len(header.wfName)
 	wfFileMaxWidth := len(header.wfFile)
 	eventsMaxWidth := len(header.events)
-	matrixMaxWidth := len(header.matrix)
 
 	for i, stage := range plan.Stages {
 		for _, r := range stage.Runs {
 			jobID := r.JobID
-			matrixStr := ""
-			if r.MatrixKey != "" {
-				matrixStr = r.MatrixKey
-				hasMatrix = true
-			}
 			line := lineInfoDef{
 				jobID:   jobID,
-				jobName: r.SimpleName(),
+				jobName: r.String(),
 				stage:   strconv.Itoa(i),
 				wfName:  r.Workflow.Name,
 				wfFile:  r.Workflow.File,
 				events:  strings.Join(r.Workflow.On(), `,`),
-				matrix:  matrixStr,
 			}
 			if _, ok := jobs[jobID]; ok {
 				duplicateJobIDs = true
@@ -83,9 +73,6 @@ func printList(plan *model.Plan) error {
 			if eventsMaxWidth < len(line.events) {
 				eventsMaxWidth = len(line.events)
 			}
-			if matrixMaxWidth < len(line.matrix) {
-				matrixMaxWidth = len(line.matrix)
-			}
 		}
 	}
 
@@ -94,55 +81,27 @@ func printList(plan *model.Plan) error {
 	stageMaxWidth += 2
 	wfNameMaxWidth += 2
 	wfFileMaxWidth += 2
-	eventsMaxWidth += 2
-	matrixMaxWidth += 2
 
-	if hasMatrix {
-		fmt.Printf("%*s%*s%*s%*s%*s%*s%*s\n",
-			-stageMaxWidth, header.stage,
-			-jobIDMaxWidth, header.jobID,
-			-jobNameMaxWidth, header.jobName,
-			-matrixMaxWidth, header.matrix,
-			-wfNameMaxWidth, header.wfName,
-			-wfFileMaxWidth, header.wfFile,
-			-eventsMaxWidth, header.events,
-		)
-		for _, line := range lineInfos {
-			fmt.Printf("%*s%*s%*s%*s%*s%*s%*s\n",
-				-stageMaxWidth, line.stage,
-				-jobIDMaxWidth, line.jobID,
-				-jobNameMaxWidth, line.jobName,
-				-matrixMaxWidth, line.matrix,
-				-wfNameMaxWidth, line.wfName,
-				-wfFileMaxWidth, line.wfFile,
-				-eventsMaxWidth, line.events,
-			)
-		}
-	} else {
+	fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
+		-stageMaxWidth, header.stage,
+		-jobIDMaxWidth, header.jobID,
+		-jobNameMaxWidth, header.jobName,
+		-wfNameMaxWidth, header.wfName,
+		-wfFileMaxWidth, header.wfFile,
+		-eventsMaxWidth, header.events,
+	)
+	for _, line := range lineInfos {
 		fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
-			-stageMaxWidth, header.stage,
-			-jobIDMaxWidth, header.jobID,
-			-jobNameMaxWidth, header.jobName,
-			-wfNameMaxWidth, header.wfName,
-			-wfFileMaxWidth, header.wfFile,
-			-eventsMaxWidth, header.events,
+			-stageMaxWidth, line.stage,
+			-jobIDMaxWidth, line.jobID,
+			-jobNameMaxWidth, line.jobName,
+			-wfNameMaxWidth, line.wfName,
+			-wfFileMaxWidth, line.wfFile,
+			-eventsMaxWidth, line.events,
 		)
-		for _, line := range lineInfos {
-			fmt.Printf("%*s%*s%*s%*s%*s%*s\n",
-				-stageMaxWidth, line.stage,
-				-jobIDMaxWidth, line.jobID,
-				-jobNameMaxWidth, line.jobName,
-				-wfNameMaxWidth, line.wfName,
-				-wfFileMaxWidth, line.wfFile,
-				-eventsMaxWidth, line.events,
-			)
-		}
 	}
 	if duplicateJobIDs {
 		fmt.Print("\nDetected multiple jobs with the same job name, use `-W` to specify the path to the specific workflow.\n")
-	}
-	if hasMatrix {
-		fmt.Print("\nTo run a specific matrix combination, use: act --matrix \"os=ubuntu-latest,node=14.x\"\nTo filter by matrix key, use: act --matrix-key \"node=14.x&os=ubuntu-latest\"\n")
 	}
 	return nil
 }

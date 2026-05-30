@@ -172,10 +172,6 @@ type TestJobFileInfo struct {
 }
 
 func (j *TestJobFileInfo) runTest(ctx context.Context, t *testing.T, cfg *Config) {
-	j.runTestWithMatrix(ctx, t, cfg, nil)
-}
-
-func (j *TestJobFileInfo) runTestWithMatrix(ctx context.Context, t *testing.T, cfg *Config, matrixFilter *model.MatrixSelector) {
 	fmt.Printf("::group::%s\n", j.workflowPath)
 
 	log.SetLevel(logLevel)
@@ -196,6 +192,7 @@ func (j *TestJobFileInfo) runTestWithMatrix(ctx context.Context, t *testing.T, c
 		Inputs:                cfg.Inputs,
 		GitHubInstance:        "github.com",
 		ContainerArchitecture: cfg.ContainerArchitecture,
+		Matrix:                cfg.Matrix,
 		ActionCache:           cfg.ActionCache,
 	}
 
@@ -209,11 +206,6 @@ func (j *TestJobFileInfo) runTestWithMatrix(ctx context.Context, t *testing.T, c
 		plan, err := planner.PlanEvent(j.eventName)
 		assert.True(t, (err == nil) != (plan == nil), "PlanEvent should return either a plan or an error")
 		if err == nil && plan != nil {
-			plan, err = planner.ExpandMatrix(plan)
-			assert.Nil(t, err, fullWorkflowPath)
-			if matrixFilter != nil && !matrixFilter.IsEmpty() {
-				plan = plan.FilterRuns(matrixFilter.Match)
-			}
 			err = runner.NewPlanExecutor(plan)(ctx)
 			if j.errorMessage == "" {
 				assert.Nil(t, err, fullWorkflowPath)
@@ -801,7 +793,7 @@ func TestRunMatrixWithUserDefinedInclusions(t *testing.T) {
 		platforms:    platforms,
 	}
 
-	tjfi.runTestWithMatrix(context.Background(), t, &Config{}, model.NewMatrixSelector(map[string]map[string]bool{
+	matrix := map[string]map[string]bool{
 		"node": {
 			"8":   true,
 			"8.x": true,
@@ -809,5 +801,7 @@ func TestRunMatrixWithUserDefinedInclusions(t *testing.T) {
 		"os": {
 			"ubuntu-18.04": true,
 		},
-	}, ""))
+	}
+
+	tjfi.runTest(context.Background(), t, &Config{Matrix: matrix})
 }

@@ -95,8 +95,7 @@ func createRootCommand(ctx context.Context, input *Input, version string) *cobra
 	rootCmd.Flags().BoolVar(&input.autoRemove, "rm", false, "automatically remove container(s)/volume(s) after a workflow(s) failure")
 	rootCmd.Flags().StringArrayVarP(&input.replaceGheActionWithGithubCom, "replace-ghe-action-with-github-com", "", []string{}, "If you are using GitHub Enterprise Server and allow specified actions from GitHub (github.com), you can set actions on this. (e.g. --replace-ghe-action-with-github-com =github/super-linter)")
 	rootCmd.Flags().StringVar(&input.replaceGheActionTokenWithGithubCom, "replace-ghe-action-token-with-github-com", "", "If you are using replace-ghe-action-with-github-com  and you want to use private actions on GitHub, you have to set personal access token")
-	rootCmd.Flags().StringArrayVarP(&input.matrix, "matrix", "", []string{}, "specify which matrix configuration to include (e.g. --matrix os:ubuntu-latest, --matrix node=14.x, or --matrix \"os=ubuntu-latest,node=14.x\"). Multiple --matrix flags are ANDed together. Use with --list to see available combinations.")
-	rootCmd.Flags().StringVarP(&input.matrixKey, "matrix-key", "", "", "filter by exact matrix key as shown in --list output (e.g. --matrix-key \"node=14.x&os=ubuntu-latest\"). Matches the canonical key, not individual dimensions.")
+	rootCmd.Flags().StringArrayVarP(&input.matrix, "matrix", "", []string{}, "specify which matrix configuration to include (e.g. --matrix java:13")
 	rootCmd.PersistentFlags().StringVarP(&input.actor, "actor", "a", "nektos/act", "user that triggered the event")
 	rootCmd.PersistentFlags().StringVarP(&input.workflowsPath, "workflows", "W", "./.github/workflows/", "path to workflow file(s)")
 	rootCmd.PersistentFlags().BoolVarP(&input.noWorkflowRecurse, "no-recurse", "", false, "Flag to disable running workflows from subdirectories of specified path in '--workflows'/'-W' flag")
@@ -372,49 +371,20 @@ func readEnvsEx(path string, envs map[string]string, caseInsensitive bool) bool 
 }
 
 func parseMatrix(matrix []string) map[string]map[string]bool {
+	// each matrix entry should be of the form - string:string
+	r := regexp.MustCompile(":")
 	matrixes := make(map[string]map[string]bool)
 	for _, m := range matrix {
-		parseMatrixEntry(m, matrixes)
+		matrix := r.Split(m, 2)
+		if len(matrix) < 2 {
+			log.Fatalf("Invalid matrix format. Failed to parse %s", m)
+		}
+		if _, ok := matrixes[matrix[0]]; !ok {
+			matrixes[matrix[0]] = make(map[string]bool)
+		}
+		matrixes[matrix[0]][matrix[1]] = true
 	}
 	return matrixes
-}
-
-func parseMatrixEntry(entry string, matrixes map[string]map[string]bool) {
-	entry = strings.TrimSpace(entry)
-	if entry == "" {
-		return
-	}
-
-	if strings.Contains(entry, ",") {
-		parts := strings.Split(entry, ",")
-		for _, part := range parts {
-			parseMatrixEntry(part, matrixes)
-		}
-		return
-	}
-
-	var key, val string
-	if strings.Contains(entry, "=") {
-		parts := strings.SplitN(entry, "=", 2)
-		key = strings.TrimSpace(parts[0])
-		val = strings.TrimSpace(parts[1])
-	} else if strings.Contains(entry, ":") {
-		parts := strings.SplitN(entry, ":", 2)
-		key = strings.TrimSpace(parts[0])
-		val = strings.TrimSpace(parts[1])
-	} else {
-		log.Fatalf("Invalid matrix format. Failed to parse %s. Expected format: key=value or key:value", entry)
-	}
-
-	if key == "" || val == "" {
-		log.Fatalf("Invalid matrix format. Failed to parse %s. Key and value must not be empty", entry)
-	}
-
-	if _, ok := matrixes[key]; !ok {
-		matrixes[key] = make(map[string]bool)
-	}
-	matrixes[key][val] = true
-	log.Debugf("Matrix filter added: %s=%s", key, val)
 }
 
 //nolint:gocyclo
@@ -478,8 +448,6 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		matrixes := parseMatrix(input.matrix)
 		log.Debugf("Evaluated matrix inclusions: %v", matrixes)
 
-		selector := model.NewMatrixSelector(matrixes, input.matrixKey)
-
 		planner, err := model.NewWorkflowPlanner(input.WorkflowsPath(), input.noWorkflowRecurse, input.strict)
 		if err != nil {
 			return err
@@ -527,7 +495,10 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		var plannerErr error
-		if filterEventName != "" {
+		if jobID != "" {
+			log.Debugf("Preparing plan with a job: %s", jobID)
+			filterPlan, plannerErr = planner.PlanJob(jobID)
+		} else if filterEventName != "" {
 			log.Debugf("Preparing plan for a event: %s", filterEventName)
 			filterPlan, plannerErr = planner.PlanEvent(filterEventName)
 		} else {
@@ -538,66 +509,20 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return plannerErr
 		}
 
-		if list || graph {
-			expandedPlan, err := planner.ExpandMatrix(filterPlan)
+		if list {
+			err = printList(filterPlan)
 			if err != nil {
-				log.Warnf("Failed to expand matrix for listing: %v", err)
-				expandedPlan = filterPlan
+				return err
 			}
+			return plannerErr
+		}
 
-			if jobID != "" {
-				log.Debugf("Filtering plan by job id: %s", jobID)
-				expandedPlan = expandedPlan.FilterRuns(func(r *model.Run) bool {
-					return r.JobID == jobID
-				})
+		if graph {
+			err = drawGraph(filterPlan)
+			if err != nil {
+				return err
 			}
-
-			if !selector.IsEmpty() {
-				log.Debugf("Filtering plan by selector: %s", selector.Reason())
-				expandedPlan = expandedPlan.FilterRuns(selector.Match)
-			}
-
-			if expandedPlan == nil || expandedPlan.IsEmpty() {
-				var hints []string
-				if jobID != "" {
-					hints = append(hints, fmt.Sprintf("job=%s", jobID))
-				}
-				if !selector.IsEmpty() {
-					hints = append(hints, selector.Reason())
-				}
-				if len(hints) > 0 {
-					fmt.Printf("No jobs match filter %s. Use `act --list` to see available combinations.\n", strings.Join(hints, ", "))
-				} else {
-					fmt.Println("No jobs found.")
-				}
-				return plannerErr
-			}
-
-			if list {
-				err = printList(expandedPlan)
-				if err != nil {
-					return err
-				}
-				var filters []string
-				if jobID != "" {
-					filters = append(filters, fmt.Sprintf("job=%s", jobID))
-				}
-				if !selector.IsEmpty() {
-					filters = append(filters, selector.Reason())
-				}
-				if len(filters) > 0 {
-					fmt.Printf("\nFiltered by: %s\n", strings.Join(filters, ", "))
-				}
-				return plannerErr
-			}
-
-			if graph {
-				err = drawGraph(expandedPlan)
-				if err != nil {
-					return err
-				}
-				return plannerErr
-			}
+			return plannerErr
 		}
 
 		// plan with triggered jobs
@@ -623,8 +548,13 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		// build the plan for this run
-		log.Debugf("Planning jobs for event: %s", eventName)
-		plan, plannerErr = planner.PlanEvent(eventName)
+		if jobID != "" {
+			log.Debugf("Planning job: %s", jobID)
+			plan, plannerErr = planner.PlanJob(jobID)
+		} else {
+			log.Debugf("Planning jobs for event: %s", eventName)
+			plan, plannerErr = planner.PlanEvent(eventName)
+		}
 		if plan != nil {
 			if len(plan.Stages) == 0 {
 				plannerErr = fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
@@ -632,37 +562,6 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 		if plan == nil && plannerErr != nil {
 			return plannerErr
-		}
-
-		plan, err = planner.ExpandMatrix(plan)
-		if err != nil {
-			log.Warnf("Failed to expand matrix: %v", err)
-		}
-
-		if jobID != "" {
-			log.Debugf("Filtering plan by job id: %s", jobID)
-			plan = plan.FilterRuns(func(r *model.Run) bool {
-				return r.JobID == jobID
-			})
-		}
-
-		if !selector.IsEmpty() {
-			log.Debugf("Filtering plan by selector: %s", selector.Reason())
-			plan = plan.FilterRuns(selector.Match)
-		}
-
-		if plan == nil || plan.IsEmpty() {
-			var hints []string
-			if jobID != "" {
-				hints = append(hints, fmt.Sprintf("job=%s", jobID))
-			}
-			if !selector.IsEmpty() {
-				hints = append(hints, selector.Reason())
-			}
-			if len(hints) > 0 {
-				return fmt.Errorf("No jobs match filter %s. Use `act --list` to see available combinations", strings.Join(hints, ", "))
-			}
-			return fmt.Errorf("Could not find any stages to run. View the valid jobs with `act --list`. Use `act --help` to find how to filter by Job ID/Workflow/Event Name")
 		}
 
 		// check to see if the main branch was defined
@@ -743,6 +642,7 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			RemoteName:                         input.remoteName,
 			ReplaceGheActionWithGithubCom:      input.replaceGheActionWithGithubCom,
 			ReplaceGheActionTokenWithGithubCom: input.replaceGheActionTokenWithGithubCom,
+			Matrix:                             matrixes,
 			ContainerNetworkMode:               docker_container.NetworkMode(input.networkName),
 			ConcurrentJobs:                     input.concurrentJobs,
 		}
