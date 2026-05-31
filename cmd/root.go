@@ -31,6 +31,7 @@ import (
 	"github.com/nektos/act/pkg/container"
 	"github.com/nektos/act/pkg/gh"
 	"github.com/nektos/act/pkg/model"
+	"github.com/nektos/act/pkg/preflight"
 	"github.com/nektos/act/pkg/runner"
 )
 
@@ -387,6 +388,28 @@ func parseMatrix(matrix []string) map[string]map[string]bool {
 	return matrixes
 }
 
+func buildPlanInfo(plan *model.Plan) preflight.PlanInfo {
+	if plan == nil {
+		return preflight.PlanInfo{IsEmpty: true}
+	}
+
+	totalJobs := 0
+	jobIDs := make([]string, 0)
+	for _, stage := range plan.Stages {
+		for _, run := range stage.Runs {
+			totalJobs++
+			jobIDs = append(jobIDs, run.JobID)
+		}
+	}
+
+	return preflight.PlanInfo{
+		Stages:    len(plan.Stages),
+		TotalJobs: totalJobs,
+		JobIDs:    jobIDs,
+		IsEmpty:   len(plan.Stages) == 0,
+	}
+}
+
 //nolint:gocyclo
 func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
@@ -464,11 +487,6 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return err
 		}
 
-		// check if we should just validate the workflows
-		if input.validate {
-			return err
-		}
-
 		// check if we should just draw the graph
 		graph, err := cmd.Flags().GetBool("graph")
 		if err != nil {
@@ -488,8 +506,6 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Debugf("Using first passed in arguments event for filtering: %s", args[0])
 			filterEventName = args[0]
 		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
-			// set default event type to first event from many available
-			// this way user dont have to specify the event.
 			log.Debugf("Using first detected workflow event for filtering: %s", events[0])
 			filterEventName = events[0]
 		}
@@ -509,7 +525,49 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			return plannerErr
 		}
 
+		// Determine the event name to be triggered
+		var eventName string
+		if len(args) > 0 {
+			eventName = args[0]
+		} else if len(events) == 1 && len(events[0]) > 0 {
+			eventName = events[0]
+		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
+			eventName = events[0]
+		} else {
+			eventName = "push"
+		}
+
+		// Build PlanInfo from the filter plan for preflight
+		filterPlanInfo := buildPlanInfo(filterPlan)
+
+		// Run preflight basic checks for all modes
+		paths := input.ResolvedPaths()
+		preflightConfig := preflight.CheckConfig{
+			Workdir:       paths.Workdir,
+			EventPath:     paths.EventPath,
+			EnvFile:       paths.EnvFile,
+			SecretFile:    paths.SecretFile,
+			VarFile:       paths.VarFile,
+			WorkflowsPath: paths.WorkflowsPath,
+			Plan:          filterPlanInfo,
+			EventName:     eventName,
+		}
+		preflightResults := preflight.RunBasicChecks(ctx, preflightConfig)
+
+		// check if we should just validate the workflows
+		if input.validate {
+			fmt.Print(preflight.FormatResults(preflightResults))
+			if preflight.HasBlockingErrors(preflightResults) {
+				return fmt.Errorf("preflight check failed with blocking errors")
+			}
+			return nil
+		}
+
 		if list {
+			fmt.Print(preflight.FormatResults(preflightResults))
+			if preflight.HasBlockingErrors(preflightResults) {
+				return fmt.Errorf("preflight check failed with blocking errors")
+			}
 			err = printList(filterPlan)
 			if err != nil {
 				return err
@@ -518,6 +576,10 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		}
 
 		if graph {
+			fmt.Print(preflight.FormatResults(preflightResults))
+			if preflight.HasBlockingErrors(preflightResults) {
+				return fmt.Errorf("preflight check failed with blocking errors")
+			}
 			err = drawGraph(filterPlan)
 			if err != nil {
 				return err
@@ -528,31 +590,13 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 		// plan with triggered jobs
 		var plan *model.Plan
 
-		// Determine the event name to be triggered
-		var eventName string
-
-		if len(args) > 0 {
-			log.Debugf("Using first passed in arguments event: %s", args[0])
-			eventName = args[0]
-		} else if len(events) == 1 && len(events[0]) > 0 {
-			log.Debugf("Using the only detected workflow event: %s", events[0])
-			eventName = events[0]
-		} else if input.autodetectEvent && len(events) > 0 && len(events[0]) > 0 {
-			// set default event type to first event from many available
-			// this way user dont have to specify the event.
-			log.Debugf("Using first detected workflow event: %s", events[0])
-			eventName = events[0]
-		} else {
-			log.Debugf("Using default workflow event: push")
-			eventName = "push"
-		}
+		log.Debugf("Planning jobs for event: %s", eventName)
 
 		// build the plan for this run
 		if jobID != "" {
 			log.Debugf("Planning job: %s", jobID)
 			plan, plannerErr = planner.PlanJob(jobID)
 		} else {
-			log.Debugf("Planning jobs for event: %s", eventName)
 			plan, plannerErr = planner.PlanEvent(eventName)
 		}
 		if plan != nil {
@@ -602,17 +646,31 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			log.Warnf(deprecationWarning, "container-cap-drop", fmt.Sprintf("--cap-drop=%s", input.containerCapDrop))
 		}
 
+		// Run preflight execution checks (in addition to basic checks already run)
+		execPreflightConfig := preflight.CheckConfig{
+			DockerDaemonSocket:    paths.DaemonSocket,
+			ContainerArchitecture: paths.ContainerArch,
+			ActionCachePath:       paths.ActionCache,
+			Platforms:             input.newPlatforms(),
+		}
+		execResults := preflight.RunExecutionChecks(ctx, execPreflightConfig)
+		allResults := append(preflightResults, execResults...)
+		fmt.Print(preflight.FormatResults(allResults))
+		if preflight.HasBlockingErrors(allResults) {
+			return fmt.Errorf("preflight check failed with blocking errors")
+		}
+
 		// run the plan
 		config := &runner.Config{
 			Actor:                              input.actor,
 			EventName:                          eventName,
-			EventPath:                          input.EventPath(),
+			EventPath:                          paths.EventPath,
 			DefaultBranch:                      defaultbranch,
 			ForcePull:                          !input.actionOfflineMode && input.forcePull,
 			ForceRebuild:                       input.forceRebuild,
 			ReuseContainers:                    input.reuseContainers,
-			Workdir:                            input.Workdir(),
-			ActionCacheDir:                     input.actionCachePath,
+			Workdir:                            paths.Workdir,
+			ActionCacheDir:                     paths.ActionCache,
 			ActionOfflineMode:                  input.actionOfflineMode,
 			BindWorkdir:                        input.bindWorkdir,
 			LogOutput:                          !input.noOutput,
@@ -624,18 +682,18 @@ func newRunCommand(ctx context.Context, input *Input) func(*cobra.Command, []str
 			Inputs:                             inputs,
 			Token:                              secrets["GITHUB_TOKEN"],
 			InsecureSecrets:                    input.insecureSecrets,
-			Platforms:                          input.newPlatforms(),
+			Platforms:                          paths.Platforms,
 			Privileged:                         input.privileged,
 			UsernsMode:                         input.usernsMode,
-			ContainerArchitecture:              input.containerArchitecture,
-			ContainerDaemonSocket:              input.containerDaemonSocket,
+			ContainerArchitecture:              paths.ContainerArch,
+			ContainerDaemonSocket:              paths.DaemonSocket,
 			ContainerOptions:                   input.containerOptions,
 			UseGitIgnore:                       input.useGitIgnore,
 			GitHubInstance:                     input.githubInstance,
 			ContainerCapAdd:                    input.containerCapAdd,
 			ContainerCapDrop:                   input.containerCapDrop,
 			AutoRemove:                         input.autoRemove,
-			ArtifactServerPath:                 input.artifactServerPath,
+			ArtifactServerPath:                 paths.ArtifactServer,
 			ArtifactServerAddr:                 input.artifactServerAddr,
 			ArtifactServerPort:                 input.artifactServerPort,
 			NoSkipCheckout:                     input.noSkipCheckout,

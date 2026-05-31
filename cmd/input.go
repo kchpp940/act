@@ -114,3 +114,55 @@ func (i *Input) EventPath() string {
 func (i *Input) Inputfile() string {
 	return i.resolve(i.inputfile)
 }
+
+// ActionCachePath returns the resolved path to the action cache directory
+func (i *Input) ActionCachePath() string {
+	return i.resolve(i.actionCachePath)
+}
+
+// CacheServerPath returns the resolved path to the cache server directory
+func (i *Input) CacheServerPath() string {
+	return i.resolve(i.cacheServerPath)
+}
+
+// ArtifactServerPath returns the resolved path to the artifact server directory
+func (i *Input) ArtifactServerPath() string {
+	return i.resolve(i.artifactServerPath)
+}
+
+// ResolvedPaths returns all resolved paths that the runner will actually use.
+// This merges CLI flags, .actrc values, and defaults into the final absolute paths,
+// so preflight checks exactly what the runner sees.
+type ResolvedPaths struct {
+	Workdir       string
+	WorkflowsPath string
+	EventPath     string
+	EnvFile       string
+	SecretFile    string
+	VarFile       string
+	InputFile     string
+	ActionCache   string
+	CacheServer   string
+	ArtifactServer string
+	DaemonSocket  string
+	ContainerArch string
+	Platforms     map[string]string
+}
+
+func (i *Input) ResolvedPaths() ResolvedPaths {
+	return ResolvedPaths{
+		Workdir:       i.Workdir(),
+		WorkflowsPath: i.WorkflowsPath(),
+		EventPath:     i.EventPath(),
+		EnvFile:       i.Envfile(),
+		SecretFile:    i.Secretfile(),
+		VarFile:       i.Varfile(),
+		InputFile:     i.Inputfile(),
+		ActionCache:   i.ActionCachePath(),
+		CacheServer:   i.CacheServerPath(),
+		ArtifactServer: i.ArtifactServerPath(),
+		DaemonSocket:  i.containerDaemonSocket,
+		ContainerArch: i.containerArchitecture,
+		Platforms:     i.newPlatforms(),
+	}
+}

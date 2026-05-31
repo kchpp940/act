@@ -26,8 +26,8 @@ func (sarm *stepActionRemoteMocks) readAction(_ context.Context, step *model.Ste
 	return args.Get(0).(*model.Action), args.Error(1)
 }
 
-func (sarm *stepActionRemoteMocks) runAction(step actionStep) common.Executor {
-	args := sarm.Called(step)
+func (sarm *stepActionRemoteMocks) runAction(step actionStep, actionDir string, remoteAction *remoteAction) common.Executor {
+	args := sarm.Called(step, actionDir, remoteAction)
 	return args.Get(0).(func(context.Context) error)
 }
 
@@ -169,7 +169,7 @@ func TestStepActionRemote(t *testing.T) {
 				sarm.On("readAction", sar.Step, suffixMatcher("act/remote-action@v1"), "", mock.Anything, mock.Anything).Return(&model.Action{}, nil)
 			}
 			if tt.mocks.run {
-				sarm.On("runAction", sar).Return(func(_ context.Context) error { return tt.runError })
+				sarm.On("runAction", sar, suffixMatcher("act/remote-action@v1"), newRemoteAction(sar.Step.Uses)).Return(func(_ context.Context) error { return tt.runError })
 
 				cm.On("Copy", "/var/run/act", mock.AnythingOfType("[]*container.FileEntry")).Return(func(_ context.Context) error {
 					return nil
@@ -578,19 +578,6 @@ func TestStepActionRemotePost(t *testing.T) {
 				},
 				Step:   tt.stepModel,
 				action: tt.actionModel,
-				actionSource: &ActionSource{
-					Type:         ActionSourceTypeRemoteAction,
-					Uses:         "remote/action@v1",
-					Org:          "remote",
-					Repo:         "action",
-					Path:         "",
-					Ref:          "v1",
-					URL:          "https://github.com",
-					CloneURL:     "https://github.com/remote/action",
-					CacheDir:     "remote/action",
-					ExecutionDir: "remote-action@v1",
-					Workdir:      "",
-				},
 			}
 			sar.RunContext.ExprEval = sar.RunContext.NewExpressionEvaluator(ctx)
 
