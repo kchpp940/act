@@ -1,10 +1,18 @@
 PREFIX ?= /usr/local
-VERSION ?= $(shell git describe --tags --dirty --always | sed -e 's/^v//')
+RELEASE_JSON := release.json
+SCENARIO ?= release
+VERSION_FILE := $(shell jq -r '.version_file' $(RELEASE_JSON) 2>/dev/null || echo VERSION)
+VERSION ?= $(shell cat $(VERSION_FILE) 2>/dev/null)
+GIT_VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null | sed -e 's/^v//')
+ifeq ($(VERSION),)
+VERSION := $(GIT_VERSION)
+endif
 IS_SNAPSHOT = $(if $(findstring -, $(VERSION)),true,false)
 MAJOR_VERSION = $(word 1, $(subst ., ,$(VERSION)))
 MINOR_VERSION = $(word 2, $(subst ., ,$(VERSION)))
-PATCH_VERSION = $(word 3, $(subst ., ,$(word 1,$(subst -, , $(VERSION)))))
+PATCH_VERSION = $(word 3, $(subst ., $(word 1,$(subst -, , $(VERSION)))))
 NEW_VERSION ?= $(MAJOR_VERSION).$(MINOR_VERSION).$(shell echo $$(( $(PATCH_VERSION) + 1)) )
+LDFLAGS ?= $(shell jq -r '.build.ldflags' $(RELEASE_JSON) 2>/dev/null | sed 's/{{ .Version }}/$(VERSION)/')
 GOVULNCHECK_PACKAGE ?= golang.org/x/vuln/cmd/govulncheck@v1
 
 fix = false
@@ -20,11 +28,11 @@ ifeq (true,$(HAS_TOKEN))
 endif
 
 .PHONY: pr
-pr: tidy format-all lint test
+pr: tidy format-all lint release-check test
 
 .PHONY: build
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o dist/local/act main.go
+	go build -ldflags "$(LDFLAGS)" -o dist/local/act main.go
 
 .PHONY: format
 format:
@@ -112,6 +120,31 @@ snapshot:
 		--snapshot
 
 .PHONY: clean all
+
+.PHONY: release-check
+release-check:
+	@CHECK_ALL_SCENARIOS=true ./scripts/release_check.sh check
+
+.PHONY: release-gen
+release-gen:
+	@echo "Regenerating release artifacts from release.json (scenario: $(SCENARIO))..."
+	@SCENARIO=$(SCENARIO) ./scripts/release_gen.sh goreleaser .goreleaser.yml
+	@echo "  Generated .goreleaser.yml"
+	@./scripts/release_gen.sh install-platforms > /tmp/act_platforms.sh && \
+		./scripts/release_gen.sh install-adjust-format > /tmp/act_format.sh && \
+		./scripts/release_gen.sh install-adjust-os > /tmp/act_adjust_os.sh && \
+		./scripts/release_gen.sh install-adjust-arch > /tmp/act_adjust_arch.sh && \
+		python3 scripts/replace_section.py install.sh get_binaries /tmp/act_platforms.sh && \
+		python3 scripts/replace_section.py install.sh adjust_format /tmp/act_format.sh && \
+		python3 scripts/replace_section.py install.sh adjust_os /tmp/act_adjust_os.sh && \
+		python3 scripts/replace_section.py install.sh adjust_arch /tmp/act_adjust_arch.sh && \
+		rm -f /tmp/act_platforms.sh /tmp/act_format.sh /tmp/act_adjust_os.sh /tmp/act_adjust_arch.sh
+	@echo "  Generated install.sh (platform-dependent functions)"
+	@./scripts/release_gen.sh readme-snippet /tmp/readme_snippet.md && \
+		python3 scripts/replace_readme_section.py README.md /tmp/readme_snippet.md && \
+		rm -f /tmp/readme_snippet.md
+	@echo "  Generated README.md (installation section)"
+	@echo "Done. Run 'make release-check' to verify."
 
 .PHONY: upgrade
 upgrade:

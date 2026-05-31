@@ -1,0 +1,97 @@
+{
+  "project_name": "act",
+  "owner": "nektos",
+  "repo": "act",
+  "binary_name": "act",
+  "version_file": "VERSION",
+  "build": {
+    "cgo_enabled": false,
+    "ldflags": "-s -w -X main.version={{ .Version }}",
+    "goos_order": ["darwin", "linux", "windows"],
+    "goarch_order": ["amd64", "386", "arm64", "arm", "riscv64"],
+    "goarm_order": ["6", "7"]
+  },
+  "archive": {
+    "default_format": "tar.gz",
+    "format_overrides": [
+      { "goos": "windows", "format": "zip" }
+    ]
+  },
+  "naming": {
+    "os_map": {
+      "darwin": "Darwin",
+      "linux": "Linux",
+      "windows": "Windows"
+    },
+    "arch_map": {
+      "386": "i386",
+      "amd64": "x86_64"
+    },
+    "template": "{{ .ProjectName }}_{{ .OsTitle }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+  },
+  "platforms": [
+    { "goos": "darwin",  "goarch": "amd64" },
+    { "goos": "darwin",  "goarch": "arm64" },
+    { "goos": "linux",   "goarch": "386" },
+    { "goos": "linux",   "goarch": "amd64" },
+    { "goos": "linux",   "goarch": "arm64" },
+    { "goos": "linux",   "goarch": "arm", "goarm": "6" },
+    { "goos": "linux",   "goarch": "arm", "goarm": "7" },
+    { "goos": "linux",   "goarch": "riscv64" },
+    { "goos": "windows", "goarch": "386" },
+    { "goos": "windows", "goarch": "amd64" },
+    { "goos": "windows", "goarch": "arm64" },
+    { "goos": "windows", "goarch": "arm", "goarm": "7" }
+  ],
+  "docker": {
+    "enabled": true,
+    "registry": "docker.io",
+    "image_name": "nektos/act",
+    "platforms": [
+      { "goos": "linux", "goarch": "amd64" },
+      { "goos": "linux", "goarch": "arm64" },
+      { "goos": "linux", "goarch": "arm", "goarm": "6" },
+      { "goos": "linux", "goarch": "arm", "goarm": "7" },
+      { "goos": "linux", "goarch": "riscv64" }
+    ],
+    "scenarios": {
+      "release": {
+        "description": "正式 tag 发布 (vX.Y.Z)",
+        "push": true,
+        "skip_push": false,
+        "tag_templates": [
+          "{{ .Version }}",
+          "v{{ .Version }}",
+          "{{ .Major }}.{{ .Minor }}"
+        ],
+        "update_latest": true,
+        "latest_tag": "latest"
+      },
+      "snapshot": {
+        "description": "主分支 snapshot 构建",
+        "push": true,
+        "skip_push": false,
+        "tag_templates": [
+          "edge",
+          "sha-{{ .ShortCommit }}"
+        ],
+        "update_latest": false
+      },
+      "pr": {
+        "description": "PR 构建",
+        "push": false,
+        "skip_push": true,
+        "tag_templates": [
+          "pr-{{ .Env.PR_NUMBER }}-{{ .ShortCommit }}"
+        ],
+        "update_latest": false
+      }
+    },
+    "dockerfile": "Dockerfile"
+  },
+  "install": {
+    "curl_template": "curl -sL https://raw.githubusercontent.com/{owner}/{repo}/master/install.sh | bash",
+    "brew_command": "brew install act",
+    "choco_command": "choco install act-cli"
+  }
+}

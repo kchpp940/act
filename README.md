@@ -25,6 +25,54 @@ Let's see it in action with a [sample repo](https://github.com/cplee/github-acti
 
 Please look at the [act user guide](https://nektosact.com) for more documentation.
 
+<!-- AUTO-GENERATED from release.json by scripts/release_gen.sh - DO NOT EDIT MANUALLY -->
+## Installation
+
+```bash
+curl -sL https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+```
+
+Or via Homebrew:
+
+```bash
+brew install act
+```
+
+Or via Chocolatey (Windows):
+
+```powershell
+choco install act-cli
+```
+
+### Supported Platforms
+
+| OS | Architecture | Archive |
+|---|---|---|
+| darwin | amd64 | `act_Darwin_x86_64.tar.gz` |
+| darwin | arm64 | `act_Darwin_arm64.tar.gz` |
+| linux | 386 | `act_Linux_i386.tar.gz` |
+| linux | amd64 | `act_Linux_x86_64.tar.gz` |
+| linux | arm64 | `act_Linux_arm64.tar.gz` |
+| linux | arm v6 | `act_Linux_armv6.tar.gz` |
+| linux | arm v7 | `act_Linux_armv7.tar.gz` |
+| linux | riscv64 | `act_Linux_riscv64.tar.gz` |
+| windows | 386 | `act_Windows_i386.zip` |
+| windows | amd64 | `act_Windows_x86_64.zip` |
+| windows | arm64 | `act_Windows_arm64.zip` |
+| windows | arm v7 | `act_Windows_armv7.zip` |
+
+### Docker
+
+```bash
+docker pull nektos/act:latest
+```
+
+Available tags: `latest`, `<major>.<minor>`, `<version>`
+<!-- END AUTO-GENERATED -->
+<!-- END AUTO-GENERATED -->
+<!-- END AUTO-GENERATED -->
+<!-- END AUTO-GENERATED -->
+
 # Support
 
 Need help? Ask in [discussions](https://github.com/nektos/act/discussions)!

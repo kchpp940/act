@@ -2,6 +2,7 @@ version: 2
 before:
   hooks:
     - go mod tidy
+version_file: VERSION
 builds:
   - env:
       - CGO_ENABLED=0
@@ -21,14 +22,18 @@ builds:
     ignore:
       - goos: windows
         goarm: '6'
+      - goos: darwin
+        goarch: arm
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
 checksum:
   name_template: 'checksums.txt'
 archives:
   - name_template: >-
       {{ .ProjectName }}_
       {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
+      {{- if eq .Arch "386" }}i386
+      {{- else if eq .Arch "amd64" }}x86_64
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
     format_overrides:
@@ -47,6 +52,88 @@ changelog:
       order: 2
     - title: 'Other'
       order: 999
+dockers:
+  - image_templates:
+      - nektos/act:{{ .Version }}-amd64
+      - nektos/act:v{{ .Version }}-amd64
+      - nektos/act:{{ .Major }}.{{ .Minor }}-amd64
+      - nektos/act:latest-amd64
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/amd64
+  - image_templates:
+      - nektos/act:{{ .Version }}-arm64
+      - nektos/act:v{{ .Version }}-arm64
+      - nektos/act:{{ .Major }}.{{ .Minor }}-arm64
+      - nektos/act:latest-arm64
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/arm64
+  - image_templates:
+      - nektos/act:{{ .Version }}-arm/v6
+      - nektos/act:v{{ .Version }}-arm/v6
+      - nektos/act:{{ .Major }}.{{ .Minor }}-arm/v6
+      - nektos/act:latest-arm/v6
+    goos: linux
+    goarch: arm
+    goarm: '6'
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/arm/v6
+  - image_templates:
+      - nektos/act:{{ .Version }}-arm/v7
+      - nektos/act:v{{ .Version }}-arm/v7
+      - nektos/act:{{ .Major }}.{{ .Minor }}-arm/v7
+      - nektos/act:latest-arm/v7
+    goos: linux
+    goarch: arm
+    goarm: '7'
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/arm/v7
+  - image_templates:
+      - nektos/act:{{ .Version }}-riscv64
+      - nektos/act:v{{ .Version }}-riscv64
+      - nektos/act:{{ .Major }}.{{ .Minor }}-riscv64
+      - nektos/act:latest-riscv64
+    goos: linux
+    goarch: riscv64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - --platform=linux/riscv64
+docker_manifests:
+  - name_template: nektos/act:{{ .Version }}
+    image_templates:
+      - nektos/act:{{ .Version }}-amd64
+      - nektos/act:{{ .Version }}-arm64
+      - nektos/act:{{ .Version }}-arm/v6
+      - nektos/act:{{ .Version }}-arm/v7
+      - nektos/act:{{ .Version }}-riscv64
+  - name_template: nektos/act:v{{ .Version }}
+    image_templates:
+      - nektos/act:v{{ .Version }}-amd64
+      - nektos/act:v{{ .Version }}-arm64
+      - nektos/act:v{{ .Version }}-arm/v6
+      - nektos/act:v{{ .Version }}-arm/v7
+      - nektos/act:v{{ .Version }}-riscv64
+  - name_template: nektos/act:{{ .Major }}.{{ .Minor }}
+    image_templates:
+      - nektos/act:{{ .Major }}.{{ .Minor }}-amd64
+      - nektos/act:{{ .Major }}.{{ .Minor }}-arm64
+      - nektos/act:{{ .Major }}.{{ .Minor }}-arm/v6
+      - nektos/act:{{ .Major }}.{{ .Minor }}-arm/v7
+      - nektos/act:{{ .Major }}.{{ .Minor }}-riscv64
+  - name_template: nektos/act:latest
+    image_templates:
+      - nektos/act:latest-amd64
+      - nektos/act:latest-arm64
+      - nektos/act:latest-arm/v6
+      - nektos/act:latest-arm/v7
+      - nektos/act:latest-riscv64
 release:
   prerelease: auto
   mode: append

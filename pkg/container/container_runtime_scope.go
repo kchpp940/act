@@ -16,13 +16,13 @@ type managedContainer struct {
 }
 
 type RuntimeScope struct {
-	ID           string
-	Name         string
-	Network      *NetworkSpec
-	containers   map[string]*managedContainer
-	subScopes    map[string]*RuntimeScope
-	parentScope  *RuntimeScope
-	isDisposed   bool
+	ID          string
+	Name        string
+	Network     *NetworkSpec
+	containers  map[string]*managedContainer
+	subScopes   map[string]*RuntimeScope
+	parentScope *RuntimeScope
+	isDisposed  bool
 }
 
 func NewRuntimeScope(id string, name string) *RuntimeScope {
@@ -38,10 +38,10 @@ func (s *RuntimeScope) WithNetwork(network *NetworkSpec) *RuntimeScope {
 	s.Network = network
 	if s.Network != nil {
 		s.Network.CleanupPlan = &CleanupPlan{
-			Owner:      CleanupOwnerScope,
-			Condition:  CleanupConditionAlways,
-			Order:      1000,
-			Actions:    []CleanupAction{CleanupActionRemoveNetwork},
+			Owner:       CleanupOwnerScope,
+			Condition:   CleanupConditionAlways,
+			Order:       1000,
+			Actions:     []CleanupAction{CleanupActionRemoveNetwork},
 			SkipOnReuse: false,
 		}
 	}

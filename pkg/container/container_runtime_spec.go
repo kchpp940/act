@@ -48,29 +48,29 @@ const (
 )
 
 type CleanupPlan struct {
-	Owner      CleanupOwner
-	Condition  CleanupCondition
-	Order      int
-	Actions    []CleanupAction
+	Owner       CleanupOwner
+	Condition   CleanupCondition
+	Order       int
+	Actions     []CleanupAction
 	SkipOnReuse bool
 }
 
 func NewCleanupPlanSelf(condition CleanupCondition, order int) *CleanupPlan {
 	return &CleanupPlan{
-		Owner:      CleanupOwnerSelf,
-		Condition:  condition,
-		Order:      order,
-		Actions:    []CleanupAction{CleanupActionRemoveContainer, CleanupActionCloseClient},
+		Owner:       CleanupOwnerSelf,
+		Condition:   condition,
+		Order:       order,
+		Actions:     []CleanupAction{CleanupActionRemoveContainer, CleanupActionCloseClient},
 		SkipOnReuse: true,
 	}
 }
 
 func NewCleanupPlanScope(condition CleanupCondition, order int) *CleanupPlan {
 	return &CleanupPlan{
-		Owner:      CleanupOwnerScope,
-		Condition:  condition,
-		Order:      order,
-		Actions:    []CleanupAction{CleanupActionRemoveContainer},
+		Owner:       CleanupOwnerScope,
+		Condition:   condition,
+		Order:       order,
+		Actions:     []CleanupAction{CleanupActionRemoveContainer},
 		SkipOnReuse: false,
 	}
 }
@@ -103,8 +103,8 @@ type NetworkLifecycle string
 
 const (
 	NetworkLifecycleCreateAndManage NetworkLifecycle = "create_and_manage"
-	NetworkLifecycleUseExisting      NetworkLifecycle = "use_existing"
-	NetworkLifecycleNone             NetworkLifecycle = "none"
+	NetworkLifecycleUseExisting     NetworkLifecycle = "use_existing"
+	NetworkLifecycleNone            NetworkLifecycle = "none"
 )
 
 const (
@@ -123,15 +123,15 @@ type ContainerLifecycle struct {
 }
 
 type ImageSpec struct {
-	Ref                 string
-	BuildContext        *ImageBuildSpec
-	PullPolicy          ImagePullPolicy
-	BuildPolicy         ImageBuildPolicy
-	ForcePull           bool
-	ForceRebuild        bool
-	Username            string
-	Password            string
-	Platform            string
+	Ref          string
+	BuildContext *ImageBuildSpec
+	PullPolicy   ImagePullPolicy
+	BuildPolicy  ImageBuildPolicy
+	ForcePull    bool
+	ForceRebuild bool
+	Username     string
+	Password     string
+	Platform     string
 }
 
 type ImageBuildSpec struct {
@@ -141,25 +141,25 @@ type ImageBuildSpec struct {
 }
 
 type NetworkSpec struct {
-	Name                string
-	Aliases             []string
-	Mode                string
-	Lifecycle           NetworkLifecycle
-	CreateIfNotExists   bool
-	CleanupPlan         *CleanupPlan
+	Name              string
+	Aliases           []string
+	Mode              string
+	Lifecycle         NetworkLifecycle
+	CreateIfNotExists bool
+	CleanupPlan       *CleanupPlan
 }
 
 type RuntimeSpec struct {
-	ScopeID          string
-	ManagedByScope   bool
-	Container        *NewContainerInput
-	Image            *ImageSpec
-	Network          *NetworkSpec
-	Lifecycle        *ContainerLifecycle
-	CleanupPlan      *CleanupPlan
-	ReuseContainer   bool
-	CapAdd           []string
-	CapDrop          []string
+	ScopeID        string
+	ManagedByScope bool
+	Container      *NewContainerInput
+	Image          *ImageSpec
+	Network        *NetworkSpec
+	Lifecycle      *ContainerLifecycle
+	CleanupPlan    *CleanupPlan
+	ReuseContainer bool
+	CapAdd         []string
+	CapDrop        []string
 }
 
 func NewRuntimeSpec() *RuntimeSpec {
@@ -172,8 +172,8 @@ func NewRuntimeSpec() *RuntimeSpec {
 			PortBindings: make(nat.PortMap),
 		},
 		Image: &ImageSpec{
-			PullPolicy:   ImagePullPolicyIfNotPresent,
-			BuildPolicy:  ImageBuildPolicyIfMissing,
+			PullPolicy:  ImagePullPolicyIfNotPresent,
+			BuildPolicy: ImageBuildPolicyIfMissing,
 		},
 		Network: &NetworkSpec{
 			Lifecycle:         NetworkLifecycleUseExisting,

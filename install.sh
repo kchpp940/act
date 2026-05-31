@@ -61,20 +61,17 @@ execute() {
 }
 get_binaries() {
   case "$PLATFORM" in
-    darwin/386) BINARIES="act" ;;
     darwin/amd64) BINARIES="act" ;;
     darwin/arm64) BINARIES="act" ;;
-    darwin/armv6) BINARIES="act" ;;
-    darwin/armv7) BINARIES="act" ;;
     linux/386) BINARIES="act" ;;
     linux/amd64) BINARIES="act" ;;
     linux/arm64) BINARIES="act" ;;
     linux/armv6) BINARIES="act" ;;
     linux/armv7) BINARIES="act" ;;
+    linux/riscv64) BINARIES="act" ;;
     windows/386) BINARIES="act" ;;
     windows/amd64) BINARIES="act" ;;
     windows/arm64) BINARIES="act" ;;
-    windows/armv6) BINARIES="act" ;;
     windows/armv7) BINARIES="act" ;;
     *)
       log_crit "platform $PLATFORM is not supported.  Make sure this script is up-to-date and file request at https://github.com/${PREFIX}/issues/new"
@@ -105,10 +102,7 @@ adjust_format() {
   true
 }
 adjust_os() {
-  # adjust archive name based on OS
   case ${OS} in
-    386) OS=i386 ;;
-    amd64) OS=x86_64 ;;
     darwin) OS=Darwin ;;
     linux) OS=Linux ;;
     windows) OS=Windows ;;
@@ -116,13 +110,9 @@ adjust_os() {
   true
 }
 adjust_arch() {
-  # adjust archive name based on ARCH
   case ${ARCH} in
     386) ARCH=i386 ;;
     amd64) ARCH=x86_64 ;;
-    darwin) ARCH=Darwin ;;
-    linux) ARCH=Linux ;;
-    windows) ARCH=Windows ;;
   esac
   true
 }

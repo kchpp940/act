@@ -1,4 +1,4 @@
-version: "2"
+version: '2'
 
 linters:
   enable:
@@ -49,13 +49,13 @@ linters:
     rules:
       # gosec rules not enforced in v1; enable incrementally
       - linters: [gosec]
-        text: "G101|G115|G117"
+        text: 'G101|G115|G117'
       # staticcheck style suggestions not enforced in v1
       - linters: [staticcheck]
-        text: "ST1005|ST1019|QF1003|QF1008|QF1012"
+        text: 'ST1005|ST1019|QF1003|QF1008|QF1012'
       # prealloc was enabled in v1 but these findings were suppressed
       - linters: [prealloc]
-        text: "Consider preallocating"
+        text: 'Consider preallocating'
     paths:
       - report
       - third_party$

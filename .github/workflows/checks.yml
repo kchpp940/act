@@ -11,6 +11,16 @@ env:
   CGO_ENABLED: 0
 
 jobs:
+  release-consistency:
+    name: release-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Check release config consistency
+        run: CHECK_ALL_SCENARIOS=true ./scripts/release_check.sh check
+
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -94,11 +104,33 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: GoReleaser
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
+        if: github.ref == 'refs/heads/master' && vars.DOCKER_SNAPSHOT == 'true'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        if: github.ref == 'refs/heads/master' && vars.DOCKER_SNAPSHOT == 'true'
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: github.ref == 'refs/heads/master' && vars.DOCKER_SNAPSHOT == 'true'
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Generate release config (snapshot scenario)
+        if: github.ref == 'refs/heads/master'
+        run: SCENARIO=snapshot make release-gen
+      - name: Generate release config (pr scenario)
+        if: github.ref != 'refs/heads/master'
+        run: SCENARIO=pr PR_NUMBER=${{ github.event.pull_request.number }} make release-gen
+      - name: GoReleaser snapshot
         uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
         with:
           version: '~> v2'
           args: release --snapshot --clean
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
       - name: Capture x86_64 (64-bit) Linux binary
         if: ${{ !env.ACT }}
         uses: actions/upload-artifact@v7
